@@ -20,10 +20,11 @@ pip install -r requirements.txt
 ```env
 GROQ_CONSOLE_URL=
 GROQ_API_KEY=
+HOST=0.0.0.0
+PORT=8000
 GROQ_MODEL=llama-3.3-70b-versatile
 DUPLO_CHECKOUT_URL=
 DUPLO_API_KEY=
-CONVERSATION_DB_PATH=conversations.sqlite3
 APP_API_KEY=
 RATE_LIMIT_PER_MINUTE=0
 ARIZE_ENABLED=false
