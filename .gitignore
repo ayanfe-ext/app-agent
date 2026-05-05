@@ -1,0 +1,60 @@
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python caches and build output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Test and coverage output
+.coverage
+.coverage.*
+coverage/
+htmlcov/
+coverage.xml
+junit.xml
+
+# Local databases and runtime state
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite3-journal
+
+# Logs and process files
+*.log
+logs/
+*.pid
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Tooling caches
+.cache/
+.ipynb_checkpoints/
+
+# Uvicorn/watch reload noise
+*.reload
