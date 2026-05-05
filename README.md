@@ -1,4 +1,4 @@
-# FastAPI Agent + GROQ Console Example
+# FastAPI Agent
 
 This project provides a FastAPI payment-operations agent. It asks Groq for a
 structured next-step decision, validates tool arguments with Pydantic, asks for
