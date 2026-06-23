@@ -1,11 +1,11 @@
-import asyncio
 import json
+import uuid
 from typing import Any, Dict, List, Optional
 
-import httpx
 from pydantic import ValidationError
 
 from .config import settings
+from .llm_provider import get_llm_provider
 from .memory import clear_conversations, load_conversation, save_conversation
 from .observability import (
     add_event,
@@ -79,99 +79,39 @@ def reset_conversations(delete_persistent: bool = False) -> None:
         set_output(span, {"cleared": True}, "application/json")
 
 
-async def call_groq_console(query: str) -> Dict[str, Any]:
-    """Call Groq and normalize common chat-completion response shapes."""
+async def call_llm(query: str) -> Dict[str, Any]:
+    """Call the configured LLM provider and return a normalized response."""
     with start_span(
-        "llm.call_groq",
+        "llm.complete",
         {
-            "llm.provider": "groq",
-            "llm.model_name": settings.groq_model,
+            "llm.provider": settings.llm_provider,
+            "llm.model_name": settings.llm_model or settings.groq_model,
             "llm.prompt_length": len(query),
-            "llm.has_api_key": bool(settings.groq_api_key),
         },
     ) as span:
         set_span_kind(span, "llm")
         set_input(span, query)
-        set_metadata(span, {"provider": "groq", "model": settings.groq_model})
-        if settings.groq_api_key:
-            try:
-                from groq import Groq  # type: ignore
-            except Exception:
-                Groq = None
-
-            if Groq:
-                client = Groq(api_key=settings.groq_api_key)
-
-                def sync_call():
-                    return client.chat.completions.create(
-                        messages=[{"role": "user", "content": query}],
-                        model=getattr(settings, "groq_model", None) or "llama-3.3-70b-versatile",
-                    )
-
-                try:
-                    res = await asyncio.get_event_loop().run_in_executor(None, sync_call)
-                except Exception as exc:
-                    add_event(span, "llm.sdk_call_failed", {"error.type": type(exc).__name__})
-                    res = None
-
-                normalized = normalize_llm_response(res)
-                if normalized:
-                    set_attribute(span, "llm.response.has_text", bool(normalized.get("text")))
-                    set_attribute(span, "llm.transport", "groq-sdk")
-                    set_output(span, normalized.get("text") or normalized)
-                    return normalized
-
-        headers = {}
-        if settings.groq_api_key:
-            headers["Authorization"] = f"Bearer {settings.groq_api_key}"
-
-        if not settings.groq_console_url:
-            set_attribute(span, "llm.configured", False)
-            fallback = {"text": '{"intent":"unknown","tool_name":null,"arguments":{},"missing_fields":[],"assistant_message":"The model is not configured yet.","ready_to_call_tool":false}'}
-            set_output(span, fallback["text"])
-            return fallback
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(settings.groq_console_url, json={"query": query}, headers=headers)
-            set_attribute(span, "http.status_code", resp.status_code)
-            set_attribute(span, "llm.transport", "http")
-            resp.raise_for_status()
-            normalized = normalize_llm_response(resp.json()) or {"raw": resp.json()}
-            set_attribute(span, "llm.response.has_text", bool(normalized.get("text")))
-            set_output(span, normalized.get("text") or normalized)
-            return normalized
+        provider = get_llm_provider()
+        set_metadata(span, {"provider": provider.name, "model": provider.model})
+        set_attributes(
+            span,
+            {
+                "llm.provider": provider.name,
+                "llm.model_name": provider.model,
+            },
+        )
+        try:
+            result = await provider.complete(query)
+        except Exception as exc:
+            add_event(span, "llm.provider_call_failed", {"error.type": type(exc).__name__})
+            raise
+        set_attribute(span, "llm.response.has_text", bool(result.get("text")))
+        set_output(span, result.get("text") or result, "text/plain")
+        return result
 
 
-def normalize_llm_response(res: Any) -> Dict[str, Any]:
-    if res is None:
-        return {}
-
-    if isinstance(res, dict):
-        choices = res.get("choices")
-        if isinstance(choices, list) and choices:
-            first = choices[0]
-            if isinstance(first, dict):
-                message = first.get("message")
-                if isinstance(message, dict) and message.get("content"):
-                    return {"text": message["content"], "raw": res}
-                if isinstance(first.get("text"), str):
-                    return {"text": first["text"], "raw": res}
-        if isinstance(res.get("text"), str):
-            return {"text": res["text"], "raw": res}
-        return {"raw": res}
-
-    choices = getattr(res, "choices", None)
-    if choices:
-        first = choices[0]
-        message = getattr(first, "message", None)
-        content = getattr(message, "content", None)
-        if content is not None:
-            return {"text": content}
-        text = getattr(first, "text", None)
-        if text:
-            return {"text": text}
-
-    return {"raw_str": str(res)}
+async def call_groq_console(query: str) -> Dict[str, Any]:
+    return await call_llm(query)
 
 
 def parse_model_json(text: str) -> Dict[str, Any]:
@@ -271,13 +211,24 @@ def extract_checkout_url(result: Dict[str, Any]) -> Optional[str]:
     return result.get("checkoutUrl") or result.get("checkout_url")
 
 
+def generate_source_reference(conversation_id: str) -> str:
+    return f"conv_{conversation_id}_{uuid.uuid4().hex[:12]}"
+
+
+def ensure_backend_source_reference(conversation_id: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
+    updated = dict(arguments or {})
+    if tool_name == "initiate_checkout" and not updated.get("source_reference"):
+        updated["source_reference"] = generate_source_reference(conversation_id)
+    return updated
+
+
 async def decide_next_step(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
     with start_span("agent.decide_next_step", {"conversation.message_count": len(messages)}) as span:
         set_span_kind(span, "chain")
         conversation_text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages)
         set_input(span, conversation_text)
         prompt = AGENT_DECISION_PROMPT + "\n\nConversation:\n" + conversation_text
-        res = await call_groq_console(prompt)
+        res = await call_llm(prompt)
         text = res.get("text", "") if isinstance(res, dict) else ""
         decision = parse_model_json(text)
 
@@ -324,7 +275,8 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
                 "checkout_url": None,
             }
 
-        validated_args, error = validate_tool_call(tool_name, pending.get("arguments") or {})
+        pending_arguments = ensure_backend_source_reference(conversation_id, tool_name, pending.get("arguments") or {})
+        validated_args, error = validate_tool_call(tool_name, pending_arguments)
         if error:
             conv["pending_tool_call"] = None
             save_conversation(conversation_id, conv)
@@ -385,7 +337,8 @@ async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], 
     ) as span:
         set_span_kind(span, "agent")
         set_input(span, decision, "application/json")
-        validated_args, error = validate_tool_call(tool_name, decision.get("arguments") or {})
+        arguments = ensure_backend_source_reference(conversation_id, tool_name, decision.get("arguments") or {})
+        validated_args, error = validate_tool_call(tool_name, arguments)
         if error:
             missing = decision.get("missing_fields") or []
             if missing:

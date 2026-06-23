@@ -1,6 +1,7 @@
 import pytest
 
 from app import agent
+from app import llm_provider
 from app.tools import TOOL_REGISTRY
 
 
@@ -25,7 +26,6 @@ def test_validate_tool_call_rejects_bad_checkout_email():
             "last_name": "Lovelace",
             "email": "not-an-email",
             "amount": 1000,
-            "source_reference": "ORDER-1",
         },
     )
 
@@ -42,12 +42,38 @@ def test_validate_tool_call_normalizes_naira_to_ngn():
             "last_name": "Lovelace",
             "email": "ada@example.com",
             "amount": 1000,
-            "source_reference": "ORDER-1",
         },
     )
 
     assert error is None
     assert validated.currency == "NGN"
+
+
+def test_validate_tool_call_rejects_non_ngn_currency():
+    validated, error = agent.validate_tool_call(
+        "initiate_checkout",
+        {
+            "currency": "USD",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "email": "ada@example.com",
+            "amount": 1000,
+        },
+    )
+
+    assert validated is None
+    assert error
+
+
+def test_get_llm_provider_uses_configured_provider(monkeypatch):
+    monkeypatch.setattr(llm_provider.settings, "llm_provider", "groq")
+    assert isinstance(llm_provider.get_llm_provider(), llm_provider.GroqProvider)
+
+
+def test_backend_generates_checkout_source_reference():
+    args = agent.ensure_backend_source_reference("checkout-1", "initiate_checkout", {})
+
+    assert args["source_reference"].startswith("conv_checkout-1_")
 
 
 def test_conversation_state_persists_between_cache_resets():
@@ -96,7 +122,6 @@ async def test_process_conversation_prepares_confirmation(monkeypatch):
                 "last_name": "Lovelace",
                 "email": "ada@example.com",
                 "amount": 1000,
-                "source_reference": "ORDER-1",
             },
             "missing_fields": [],
             "assistant_message": "",
@@ -133,7 +158,6 @@ async def test_process_conversation_executes_confirmed_tool(monkeypatch):
                 "last_name": "Lovelace",
                 "email": "ada@example.com",
                 "amount": 1000,
-                "source_reference": "ORDER-1",
             },
         }
         agent.append_message(cid, {"role": "user", "content": "yes"})

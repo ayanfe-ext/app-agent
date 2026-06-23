@@ -1,6 +1,6 @@
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 
 
 class ChatMessage(BaseModel):
@@ -35,7 +35,7 @@ def normalize_currency_value(value: str) -> str:
     if normalized in {"ngn", "naira", "nigerian-naira", "nigeriannaira", "₦"}:
         return "NGN"
 
-    return normalized.upper()
+    raise ValueError("only NGN is supported")
 
 
 class InitiateCheckoutArgs(BaseModel):
@@ -44,13 +44,15 @@ class InitiateCheckoutArgs(BaseModel):
     last_name: str = Field(..., min_length=1)
     email: str
     amount: float = Field(..., gt=0)
-    source_reference: str = Field(..., min_length=1)
+    source_reference: Optional[str] = Field(default=None, min_length=1)
 
-    @validator("currency")
+    @field_validator("currency")
+    @classmethod
     def normalize_currency(cls, value: str) -> str:
         return normalize_currency_value(value)
 
-    @validator("email")
+    @field_validator("email")
+    @classmethod
     def validate_email(cls, value: str) -> str:
         if "@" not in value or "." not in value.split("@")[-1]:
             raise ValueError("invalid email address")
@@ -65,7 +67,8 @@ class InitiatePayoutArgs(BaseModel):
     bank_code: str = Field(..., min_length=1)
     source_reference: str = Field(..., min_length=1)
 
-    @validator("currency")
+    @field_validator("currency")
+    @classmethod
     def normalize_currency(cls, value: str) -> str:
         return normalize_currency_value(value)
 

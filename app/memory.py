@@ -34,7 +34,7 @@ def load_conversation(conversation_id: str) -> Optional[Dict[str, Any]]:
         with _connect() as conn:
             row = conn.execute(
                 "SELECT state_json FROM conversations WHERE conversation_id = ?",
-                (conversation_id,),
+                (conversation_id,),  ## parameterized queries to prevent SQL injection
             ).fetchone()
 
         set_attribute(span, "db.system", "sqlite")

@@ -2,9 +2,17 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    llm_provider: str = "groq"
+    llm_model: str = ""
+    llm_base_url: str = ""
+
     groq_console_url: str = ""
     groq_api_key: str = ""
     groq_model: str = "llama-3.3-70b-versatile"
+
+    openai_api_key: str = ""
+    openai_model: str = "gpt-4o-mini"
+    openai_base_url: str = ""
 
     duplo_checkout_url: str = ""
     duplo_base_url: str = ""

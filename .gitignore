@@ -56,5 +56,10 @@ Thumbs.db
 .cache/
 .ipynb_checkpoints/
 
+# Local proposal drafts
+PROJECT_PROPOSAL.md
+PROJECT_PROPOSAL.docx
+PROJECT_PROPOSAL.pdf
+
 # Uvicorn/watch reload noise
 *.reload

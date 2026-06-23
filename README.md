@@ -1,6 +1,6 @@
 # FastAPI Agent
 
-This project provides a FastAPI payment-operations agent. It asks Groq for a
+This project provides a FastAPI payment-operations agent. It asks a configured LLM for a
 structured next-step decision, validates tool arguments with Pydantic, asks for
 confirmation before money-moving actions, executes registered tools, and stores
 conversation state in SQLite.
@@ -18,8 +18,14 @@ pip install -r requirements.txt
 2. Copy `.env.example` to `.env` and set values as needed:
 
 ```env
+LLM_PROVIDER=groq
+LLM_MODEL=
+LLM_BASE_URL=
 GROQ_CONSOLE_URL=
 GROQ_API_KEY=
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_BASE_URL=
 HOST=0.0.0.0
 PORT=8000
 GROQ_MODEL=llama-3.3-70b-versatile
@@ -36,6 +42,11 @@ ARIZE_LOG_TO_CONSOLE=false
 
 `APP_API_KEY` is optional. If set, requests to `/conversation` must include
 `X-API-Key`. `RATE_LIMIT_PER_MINUTE=0` disables the in-process rate limiter.
+
+Set `LLM_PROVIDER=groq` or `LLM_PROVIDER=openai` to switch model providers.
+Use `LLM_MODEL` to override the provider default model. The agent only supports
+Nigerian Naira for payment tools; naira aliases are normalized to `NGN`, and
+other currencies are rejected before tool execution.
 
 Arize AX observability is optional. Set `ARIZE_ENABLED=true`,
 `ARIZE_SPACE_ID`, and `ARIZE_API_KEY` to export OpenTelemetry traces to AX.
