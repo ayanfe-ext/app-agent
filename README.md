@@ -48,6 +48,9 @@ Use `LLM_MODEL` to override the provider default model. The agent only supports
 Nigerian Naira for payment tools; naira aliases are normalized to `NGN`, and
 other currencies are rejected before tool execution.
 
+Customer checkout stays on `POST /conversation`. Merchant payout is exposed on
+`POST /merchant/payout` and requires `MERCHANT_API_KEY`.
+
 Arize AX observability is optional. Set `ARIZE_ENABLED=true`,
 `ARIZE_SPACE_ID`, and `ARIZE_API_KEY` to export OpenTelemetry traces to AX.
 `ARIZE_PROJECT_NAME` controls the project name shown in Arize. Set

@@ -17,8 +17,12 @@ from .observability import (
     set_span_kind,
     start_span,
 )
-from .prompts import AGENT_DECISION_PROMPT
+from .prompts import CUSTOMER_AGENT_PROMPT, MERCHANT_AGENT_PROMPT
 from .tools import TOOL_REGISTRY, model_to_dict
+
+
+CUSTOMER_ALLOWED_TOOLS = {"initiate_checkout"}
+MERCHANT_ALLOWED_TOOLS = {"initiate_checkout", "initiate_payout"}
 
 
 conversation_store: Dict[str, Dict[str, Any]] = {}
@@ -175,6 +179,18 @@ def user_declined_latest_message(message: str) -> bool:
     return message.lower().strip() in {"no", "n", "cancel", "stop", "do not proceed"}
 
 
+def allowed_tools_for_actor(actor_type: str) -> set[str]:
+    if actor_type == "merchant":
+        return MERCHANT_ALLOWED_TOOLS
+    return CUSTOMER_ALLOWED_TOOLS
+
+
+def prompt_for_actor(actor_type: str) -> str:
+    if actor_type == "merchant":
+        return MERCHANT_AGENT_PROMPT
+    return CUSTOMER_AGENT_PROMPT
+
+
 def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name == "initiate_checkout":
         return (
@@ -186,7 +202,8 @@ def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name == "initiate_payout":
         return (
             "Please confirm: initiate a payout of "
-            f"{args['currency']} {args['amount']} to {args['recipient_name']}?"
+            f"{args['currency']} {args['amount']} to "
+            f"{args.get('account_name') or args.get('account_number')}?"
         )
 
     return "Please confirm that you want me to continue."
@@ -217,17 +234,20 @@ def generate_source_reference(conversation_id: str) -> str:
 
 def ensure_backend_source_reference(conversation_id: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     updated = dict(arguments or {})
-    if tool_name == "initiate_checkout" and not updated.get("source_reference"):
+    if tool_name in {"initiate_checkout", "initiate_payout"} and not updated.get("source_reference"):
         updated["source_reference"] = generate_source_reference(conversation_id)
     return updated
 
 
-async def decide_next_step(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    with start_span("agent.decide_next_step", {"conversation.message_count": len(messages)}) as span:
+async def decide_next_step(messages: List[Dict[str, Any]], actor_type: str = "customer") -> Dict[str, Any]:
+    with start_span(
+        "agent.decide_next_step",
+        {"conversation.message_count": len(messages), "actor.type": actor_type},
+    ) as span:
         set_span_kind(span, "chain")
         conversation_text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages)
         set_input(span, conversation_text)
-        prompt = AGENT_DECISION_PROMPT + "\n\nConversation:\n" + conversation_text
+        prompt = prompt_for_actor(actor_type) + "\n\nConversation:\n" + conversation_text
         res = await call_llm(prompt)
         text = res.get("text", "") if isinstance(res, dict) else ""
         decision = parse_model_json(text)
@@ -253,7 +273,7 @@ async def decide_next_step(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         return normalized
 
 
-async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any], actor_type: str = "customer") -> Dict[str, Any]:
     pending = conv.get("pending_tool_call") or {}
     tool_name = pending.get("tool_name")
     with start_span(
@@ -262,6 +282,17 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
     ) as span:
         set_span_kind(span, "agent")
         set_input(span, {"conversation_id": conversation_id, "pending_tool_call": pending}, "application/json")
+        if tool_name not in allowed_tools_for_actor(actor_type):
+            conv["pending_tool_call"] = None
+            save_conversation(conversation_id, conv)
+            set_attributes(span, {"tool.allowed": False, "actor.type": actor_type})
+            return {
+                "conversation_id": conversation_id,
+                "assistant_message": "That action is not available in this conversation.",
+                "status": "collecting",
+                "checkout_url": None,
+            }
+
         tool = TOOL_REGISTRY.get(tool_name)
         if not tool:
             conv["pending_tool_call"] = None
@@ -326,10 +357,16 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
             "assistant_message": message,
             "status": "completed" if conv["completed"] else "collecting",
             "checkout_url": checkout_url,
+            "tool_result": result,
         }
 
 
-async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
+async def prepare_tool_confirmation(
+    conversation_id: str,
+    conv: Dict[str, Any],
+    decision: Dict[str, Any],
+    actor_type: str = "customer",
+) -> Dict[str, Any]:
     tool_name = decision.get("tool_name")
     with start_span(
         "agent.prepare_tool_confirmation",
@@ -337,6 +374,16 @@ async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], 
     ) as span:
         set_span_kind(span, "agent")
         set_input(span, decision, "application/json")
+        if tool_name not in allowed_tools_for_actor(actor_type):
+            set_attributes(span, {"tool.allowed": False, "actor.type": actor_type})
+            set_output(span, {"status": "collecting", "error": "tool_not_allowed"}, "application/json")
+            return {
+                "conversation_id": conversation_id,
+                "assistant_message": "That action is not available in this conversation.",
+                "status": "collecting",
+                "checkout_url": None,
+            }
+
         arguments = ensure_backend_source_reference(conversation_id, tool_name, decision.get("arguments") or {})
         validated_args, error = validate_tool_call(tool_name, arguments)
         if error:
@@ -382,12 +429,13 @@ async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], 
             "assistant_message": "Done.",
             "status": "completed",
             "checkout_url": checkout_url,
+            "tool_result": result,
         }
 
 
-async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]:
+async def process_conversation(conversation_id: Optional[str], actor_type: str = "customer") -> Dict[str, Any]:
     cid = _ensure_conversation(conversation_id)
-    with start_span("agent.process_conversation", {"conversation.id": cid}) as span:
+    with start_span("agent.process_conversation", {"conversation.id": cid, "actor.type": actor_type}) as span:
         set_span_kind(span, "agent")
         conv = conversation_store[cid]
         latest_message = conv["messages"][-1]["content"] if conv["messages"] else ""
@@ -403,7 +451,7 @@ async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]
         if conv.get("pending_tool_call"):
             if user_confirmed_latest_message(latest_message):
                 set_attribute(span, "confirmation.status", "confirmed")
-                result = await execute_pending_tool(cid, conv)
+                result = await execute_pending_tool(cid, conv, actor_type)
                 set_output(span, result, "application/json")
                 return result
             if user_declined_latest_message(latest_message):
@@ -427,7 +475,7 @@ async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]
                 "checkout_url": None,
             }
 
-        decision = await decide_next_step(conv.get("messages", []))
+        decision = await decide_next_step(conv.get("messages", []), actor_type)
         if not decision.get("ready_to_call_tool"):
             set_attribute(span, "agent.status", "collecting")
             set_output(span, {"status": "collecting", "assistant_message": decision.get("assistant_message")}, "application/json")
@@ -439,7 +487,7 @@ async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]
             }
 
         set_attribute(span, "agent.status", "preparing_tool")
-        result = await prepare_tool_confirmation(cid, conv, decision)
+        result = await prepare_tool_confirmation(cid, conv, decision, actor_type)
         set_output(span, result, "application/json")
         return result
 

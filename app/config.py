@@ -17,9 +17,11 @@ class Settings(BaseSettings):
     duplo_checkout_url: str = ""
     duplo_base_url: str = ""
     duplo_api_key: str = ""
+    duplo_payout_url: str = ""
 
     conversation_db_path: str = "conversations.sqlite3"
     app_api_key: str = ""
+    merchant_api_key: str = ""
     rate_limit_per_minute: int = 0
 
     arize_enabled: bool = False

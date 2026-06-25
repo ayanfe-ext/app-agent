@@ -18,7 +18,7 @@ def test_health():
 def test_conversation_reuses_cookie_conversation_id(monkeypatch):
     agent.reset_conversations(delete_persistent=True)
 
-    async def fake_process_conversation(conversation_id):
+    async def fake_process_conversation(conversation_id, actor_type="customer"):
         return {
             "conversation_id": conversation_id,
             "assistant_message": "Saved.",
@@ -51,5 +51,33 @@ def test_conversation_reuses_cookie_conversation_id(monkeypatch):
         "user",
         "assistant",
     ]
+
+    agent.reset_conversations(delete_persistent=True)
+
+
+def test_merchant_conversation_uses_merchant_actor(monkeypatch):
+    agent.reset_conversations(delete_persistent=True)
+    monkeypatch.setattr("app.routes.settings.merchant_api_key", "merchant-test-key")
+    seen = {}
+
+    async def fake_process_conversation(conversation_id, actor_type="customer"):
+        seen["actor_type"] = actor_type
+        return {
+            "conversation_id": conversation_id,
+            "assistant_message": "Merchant saved.",
+            "status": "collecting",
+            "checkout_url": None,
+        }
+
+    monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
+
+    res = client.post(
+        "/merchant/conversation",
+        json={"message": {"role": "user", "content": "pay a vendor"}},
+        headers={"X-API-Key": "merchant-test-key"},
+    )
+
+    assert res.status_code == 200
+    assert seen["actor_type"] == "merchant"
 
     agent.reset_conversations(delete_persistent=True)

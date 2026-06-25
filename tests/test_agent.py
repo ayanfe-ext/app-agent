@@ -89,7 +89,7 @@ def test_conversation_state_persists_between_cache_resets():
 
 @pytest.mark.asyncio
 async def test_process_conversation_collects_when_model_needs_details(monkeypatch):
-    async def fake_decide_next_step(messages):
+    async def fake_decide_next_step(messages, actor_type="customer"):
         return {
             "intent": "initiate_payout",
             "tool_name": "initiate_payout",
@@ -112,7 +112,7 @@ async def test_process_conversation_collects_when_model_needs_details(monkeypatc
 
 @pytest.mark.asyncio
 async def test_process_conversation_prepares_confirmation(monkeypatch):
-    async def fake_decide_next_step(messages):
+    async def fake_decide_next_step(messages, actor_type="customer"):
         return {
             "intent": "initiate_checkout",
             "tool_name": "initiate_checkout",
@@ -138,6 +138,65 @@ async def test_process_conversation_prepares_confirmation(monkeypatch):
     assert res["status"] == "awaiting_confirmation"
     assert "Please confirm" in res["assistant_message"]
     assert agent.conversation_store[cid]["pending_tool_call"]["tool_name"] == "initiate_checkout"
+
+
+@pytest.mark.asyncio
+async def test_customer_conversation_cannot_prepare_payout(monkeypatch):
+    async def fake_decide_next_step(messages, actor_type="customer"):
+        return {
+            "intent": "initiate_payout",
+            "tool_name": "initiate_payout",
+            "arguments": {
+                "currency": "NGN",
+                "amount": 1000,
+                "account_number": "0123456789",
+                "bank_name": "Kuda",
+                "narration": "Refund",
+            },
+            "missing_fields": [],
+            "assistant_message": "",
+            "ready_to_call_tool": True,
+        }
+
+    monkeypatch.setattr(agent, "decide_next_step", fake_decide_next_step)
+
+    cid = agent._ensure_conversation("customer-payout-blocked")
+    agent.append_message(cid, {"role": "user", "content": "Pay John"})
+
+    res = await agent.process_conversation(cid, actor_type="customer")
+
+    assert res["status"] == "collecting"
+    assert "not available" in res["assistant_message"]
+
+
+@pytest.mark.asyncio
+async def test_merchant_conversation_can_prepare_payout(monkeypatch):
+    async def fake_decide_next_step(messages, actor_type="customer"):
+        assert actor_type == "merchant"
+        return {
+            "intent": "initiate_payout",
+            "tool_name": "initiate_payout",
+            "arguments": {
+                "currency": "NGN",
+                "amount": 1000,
+                "account_number": "0123456789",
+                "bank_name": "Kuda",
+                "narration": "Refund",
+            },
+            "missing_fields": [],
+            "assistant_message": "",
+            "ready_to_call_tool": True,
+        }
+
+    monkeypatch.setattr(agent, "decide_next_step", fake_decide_next_step)
+
+    cid = agent._ensure_conversation("merchant-payout")
+    agent.append_message(cid, {"role": "user", "content": "Pay John"})
+
+    res = await agent.process_conversation(cid, actor_type="merchant")
+
+    assert res["status"] == "awaiting_confirmation"
+    assert agent.conversation_store[cid]["pending_tool_call"]["tool_name"] == "initiate_payout"
 
 
 @pytest.mark.asyncio
