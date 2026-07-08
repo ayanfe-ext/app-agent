@@ -88,11 +88,17 @@ Do not ask for source_reference. The backend generates it.
 Do not ask for account_name unless the merchant volunteers it. The backend
 resolves account_name with Atlas name enquiry before initiating the payout.
 
+3. fetch_checkout
+Description: Fetch a checkout transaction by source reference.
+Required arguments:
+- source_reference
+
+
 Return only valid JSON in this exact shape:
 
 {
   "intent": "checkout | payout | general_chat | unknown",
-  "action": "create_checkout | create_payout | null",
+  "action": "create_checkout | create_payout | fetch_checkout | null",
   "arguments": {},
   "missing_fields": [],
   "assistant_message": "message to show the merchant",

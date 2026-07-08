@@ -10,6 +10,7 @@ from app.schemas import (
     DuploPayoutRequest,
     DuploPayoutResponse,
     DuploPayoutLookupResponse,
+    DuploCheckoutLookupResponse,
     ResolveAccountRequest,
     ResolveAccountResponse,
 )
@@ -23,6 +24,7 @@ from .tools import (
     call_duplo_payout,
     fetch_banks,
     fetch_payout_by_source_reference,
+    fetch_checkout_by_source_reference,
     match_bank,
     prepare_payout_payload,
     resolve_account_name,
@@ -270,6 +272,42 @@ async def merchant_payout_lookup(source_reference: str):
             data=data if isinstance(data, dict) else None,
             raw=result if isinstance(result, dict) else {"raw": result},
             sourceReference=(data or {}).get("sourceReference") if isinstance(data, dict) else source_reference,
+        )
+        set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
+        return response
+
+
+@router.get("/merchant/checkout/transactions/{source_reference}", response_model=DuploCheckoutLookupResponse, dependencies=[Depends(require_merchant_api_key), Depends(rate_limit)])
+async def merchant_checkout_lookup(source_reference: str):
+    with start_span(
+        "http.get.merchant_checkout_lookup",
+        {
+            "http.route": "/merchant/checkout/transactions/{source_reference}",
+            "checkout.source_reference": source_reference,
+        },
+    ) as span:
+        set_span_kind(span, "tool")
+        set_input(span, {"source_reference": source_reference}, "application/json")
+        result = await fetch_checkout_by_source_reference(source_reference)
+        data = result.get("data") if isinstance(result, dict) else None
+        # provider may nest the real payload under data.data; prefer top-level then inner
+        source_ref = source_reference
+        if isinstance(data, dict):
+            if data.get("sourceReference"):
+                source_ref = data.get("sourceReference")
+            else:
+                inner = data.get("data")
+                if isinstance(inner, dict) and inner.get("sourceReference"):
+                    source_ref = inner.get("sourceReference")
+
+        response = DuploCheckoutLookupResponse(
+            requestId=result.get("requestId"),
+            requestTimestamp=result.get("requestTimestamp"),
+            message=result.get("message") or result.get("text"),
+            statusCode=result.get("statusCode"),
+            data=data if isinstance(data, dict) else None,
+            raw=result if isinstance(result, dict) else {"raw": result},
+            sourceReference=source_ref,
         )
         set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
         return response

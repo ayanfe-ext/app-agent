@@ -147,3 +147,17 @@ class DuploPayoutLookupResponse(BaseModel):
     data: Optional[Dict[str, Any]] = None
     raw: Optional[Dict[str, Any]] = None
     sourceReference: Optional[str] = None
+
+class DuploCheckoutLookupResponse(BaseModel):
+    requestId: Optional[str] = None
+    requestTimestamp: Optional[str] = None
+    message: Optional[str] = None
+    statusCode: Optional[int] = None
+    data: Optional[Dict[str, Any]] = None
+    raw: Optional[Dict[str, Any]] = None
+    sourceReference: Optional[str] = None
+
+class FetchCheckoutArgs(BaseModel):
+    source_reference: str = Field(..., min_length=1)
+
+

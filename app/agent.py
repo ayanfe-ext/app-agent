@@ -22,16 +22,18 @@ from .tools import TOOL_REGISTRY, model_to_dict
 
 
 CUSTOMER_ALLOWED_TOOLS = {"initiate_checkout"}
-MERCHANT_ALLOWED_TOOLS = {"initiate_checkout", "initiate_payout"}
+MERCHANT_ALLOWED_TOOLS = {"initiate_checkout", "initiate_payout", "fetch_checkout"}
 PUBLIC_ACTION_TO_TOOL = {
     "create_checkout": "initiate_checkout",
     "checkout": "initiate_checkout",
     "create_payout": "initiate_payout",
     "payout": "initiate_payout",
+    "fetch_checkout": "fetch_checkout",
 }
 INTERNAL_RESPONSE_REPLACEMENTS = {
     "initiate_checkout": "create a checkout",
     "initiate_payout": "create a payout",
+    "fetch_checkout": "fetch a checkout",
     "tool_name": "action",
     "tool call": "payment action",
     "tool": "payment action",

@@ -8,7 +8,7 @@ from pydantic import BaseModel
 
 from .config import settings
 from .observability import add_event, set_attribute, set_attributes, set_input, set_output, set_span_kind, start_span
-from .schemas import InitiateCheckoutArgs, InitiatePayoutArgs
+from .schemas import InitiateCheckoutArgs, InitiatePayoutArgs, FetchCheckoutArgs, FetchCheckoutResponse
 
 
 class ToolDefinition(BaseModel):
@@ -421,6 +421,53 @@ async def fetch_payout_by_source_reference(source_reference: str) -> Dict[str, A
             return result
 
 
+
+async def fetch_checkout_by_source_reference(source_reference: Any) -> FetchCheckoutResponse:
+    if not isinstance(source_reference, str):
+        source_reference = getattr(source_reference, "source_reference", None)
+
+    with start_span(
+        "tool.duplo_checkout_lookup",
+        {
+            "tool.name": "fetch_checkout_by_source_reference",
+            "checkout.source_reference": source_reference,
+        },
+    ) as span:
+        set_span_kind(span, "tool")
+        set_input(span, {"source_reference": source_reference}, "application/json")
+        if not settings.duplo_base_url:
+            raise RuntimeError("Duplo base URL not configured")
+
+        headers = {"Content-Type": "application/json"}
+        if settings.duplo_api_key:
+            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+
+        url = f"{settings.duplo_base_url}/checkout/transactions/source-reference/{source_reference}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await retry_async(lambda: client.get(url, headers=headers, follow_redirects=False))
+            except Exception as exc:
+                set_attributes(span, {"tool.success": False, "error.type": type(exc).__name__})
+                result = {"error": str(exc)}
+                set_output(span, result, "application/json")
+                return result
+
+            set_attribute(span, "http.status_code", resp.status_code)
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError:
+                result = {"status_code": resp.status_code, "text": resp.text}
+                set_output(span, result, "application/json")
+                return result
+
+            try:
+                result = resp.json()
+            except Exception:
+                result = {"text": resp.text}
+            set_output(span, result, "application/json")
+            return result
+
+
 async def initiate_checkout_handler(args: InitiateCheckoutArgs) -> Dict[str, Any]:
     with start_span("tool.handler.initiate_checkout", {"tool.name": "initiate_checkout"}) as span:
         set_span_kind(span, "tool")
@@ -464,4 +511,11 @@ TOOL_REGISTRY = {
         handler=initiate_payout_handler,
         requires_confirmation=True,
     ),
+    "fetch_checkout": ToolDefinition(
+        name="fetch_checkout",
+        description="Fetch a checkout transaction by source reference.",
+        args_schema=FetchCheckoutArgs,
+        handler=fetch_checkout_by_source_reference,
+        requires_confirmation=False,
+    )
 }
