@@ -67,12 +67,21 @@ def configure_tracing() -> None:
     except Exception:
         return
 
-    try:
-        from openinference.instrumentation.groq import GroqInstrumentor
+    provider_name = (settings.llm_provider or "").strip().lower()
+    if provider_name == "groq":
+        try:
+            from openinference.instrumentation.groq import GroqInstrumentor
 
-        GroqInstrumentor().instrument(tracer_provider=tracer_provider)
-    except Exception:
-        pass
+            GroqInstrumentor().instrument(tracer_provider=tracer_provider)
+        except Exception:
+            pass
+    elif provider_name == "openai":
+        try:
+            from openinference.instrumentation.openai import OpenAIInstrumentor
+            
+            OpenAIInstrumentor().instrument(tracer_provider=tracer_provider)
+        except Exception:
+            pass
 
 
 def get_tracer():

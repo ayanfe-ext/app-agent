@@ -160,4 +160,15 @@ class DuploCheckoutLookupResponse(BaseModel):
 class FetchCheckoutArgs(BaseModel):
     source_reference: str = Field(..., min_length=1)
 
+class FetchAllPayoutsArgs(BaseModel):
+    pass
 
+class DuploPayoutsLookupResponse(BaseModel):
+    requestId: Optional[str] = None
+    requestTimestamp: Optional[str] = None
+    message: Optional[str] = None
+    statusCode: Optional[int] = None
+    data: Optional[Dict[str, Any]] = None
+    raw: Optional[Dict[str, Any]] = None
+    links: Optional[Dict[str, Any]] = None
+    total: Optional[int] = None

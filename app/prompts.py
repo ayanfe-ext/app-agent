@@ -93,12 +93,17 @@ Description: Fetch a checkout transaction by source reference.
 Required arguments:
 - source_reference
 
+4. fetch_all_payouts
+Description: Fetch all payouts for the merchant.
+Required arguments:
+- None
+
 
 Return only valid JSON in this exact shape:
 
 {
   "intent": "checkout | payout | general_chat | unknown",
-  "action": "create_checkout | create_payout | fetch_checkout | null",
+  "action": "create_checkout | create_payout | fetch_checkout | fetch_all_payouts | null",
   "arguments": {},
   "missing_fields": [],
   "assistant_message": "message to show the merchant",

@@ -5,7 +5,7 @@ from .routes import router
 
 
 configure_tracing()
-app = FastAPI(title="FastAPI Agent (GROQ)")
+app = FastAPI(title="FastAPI Agent", version="1.0")
 app.include_router(router)
 
 
