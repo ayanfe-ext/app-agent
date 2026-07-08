@@ -128,17 +128,18 @@ async def call_duplo_checkout(payload: Dict[str, Any]) -> Dict[str, Any]:
             return result
 
 
-async def resolve_account_name(account_number: str, bank_code: str) -> Dict[str, Any]:
+async def resolve_account_name(account_number: str, bank_code: str, currency: str) -> Dict[str, Any]:
     with start_span(
         "tool.duplo_name_enquiry",
         {
             "tool.name": "resolve_account_name",
             "account.number_length": len(account_number),
             "bank.code": bank_code,
+            "currency": currency,
         },
     ) as span:
         set_span_kind(span, "tool")
-        payload = {"accountNumber": account_number, "bankCode": bank_code}
+        payload = {"account_number": account_number, "bank_code": bank_code, "currency": currency}
         set_input(span, payload, "application/json")
 
         if not settings.duplo_base_url:
@@ -156,6 +157,18 @@ async def resolve_account_name(account_number: str, bank_code: str) -> Dict[str,
                 follow_redirects=False,
             )
             set_attribute(span, "http.status_code", resp.status_code)
+
+            if resp.status_code != 200:
+                try:
+                    set_output(span, {"error_body": resp.text}, "application/json")
+                except Exception:
+                    pass
+                # keep a console log for quick debugging
+                try:
+                    print(f"[agent] name-enquiry failed: status={resp.status_code}, body={resp.text}")
+                except Exception:
+                    pass
+
             resp.raise_for_status()
             result = resp.json()
             set_output(span, result, "application/json")
@@ -176,7 +189,7 @@ async def fetch_banks(currency: str) -> List[Dict[str, Any]]:
         if settings.duplo_api_key:
             headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
 
-        url = f"{settings.duplo_base_url}/banking/bank/{currency}"
+        url = f"{settings.duplo_base_url}/banking/banks/{currency}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await retry_async(lambda: client.get(url, headers=headers, follow_redirects=False))
             set_attribute(span, "http.status_code", resp.status_code)
@@ -253,11 +266,21 @@ async def prepare_payout_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         bank = match_bank(banks, prepared.get("bank_name"), prepared.get("bank_code"))
         prepared["bank_code"] = bank_code_from(bank)
         prepared["bank_name"] = bank_name_from(bank)
+        prepared["currency"] = str(prepared["currency"]).upper()
 
-        resolved = await resolve_account_name(prepared["account_number"], str(prepared["bank_code"]))
+        resolved = await resolve_account_name(prepared["account_number"], str(prepared["bank_code"]), str(prepared["currency"]))
+        
+        try:
+            print(f"[agent] name-enquiry resolved response: {resolved}")
+        except Exception:
+            pass
+        
         account_name = resolved_account_name_from(resolved)
+        print(f"[agent] resolved account name: {account_name}")
         if not account_name:
+            print(f"[agent] unable to resolve account name from response: {resolved}")
             raise ValueError("Unable to resolve account name")
+        
 
         prepared["account_name"] = account_name
         prepared["type"] = "bank_transfer"

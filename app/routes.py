@@ -105,6 +105,7 @@ async def _run_conversation(
         agent.append_message(cid, {"role": req.message.role, "content": req.message.content})
 
         res = await agent.process_conversation(cid, actor_type=actor_type)
+        res["assistant_message"] = agent.sanitize_assistant_message(res["assistant_message"])
         agent.append_message(cid, {"role": "assistant", "content": res["assistant_message"]})
         set_attributes(
             span,
@@ -153,7 +154,7 @@ async def merchant_conversation_endpoint(
 async def get_banks():
     with start_span(
         "http.get_banks",
-        {"http.method": "GET", "http.url": f"{settings.duplo_base_url}/banking/bank/NGN"},
+        {"http.method": "GET", "http.url": f"{settings.duplo_base_url}/banking/banks/NGN"},
     ) as span:
         set_span_kind(span, "http")
         set_input(span, {"currency": "NGN"}, "application/json")
@@ -162,6 +163,7 @@ async def get_banks():
         except Exception as exc:
             set_attributes(span, {"http.success": False, "error.type": type(exc).__name__})
             result = {"error": str(exc)}
+            print(f"[agent] error fetching banks: {exc}")
             set_output(span, result, "application/json")
             return result
         set_output(span, result, "application/json")
@@ -185,19 +187,21 @@ async def merchant_resolve_account(req: ResolveAccountRequest):
             bank = match_bank(banks, None, req.bank_code)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        result = await resolve_account_name(req.account_number, req.bank_code)
+        result = await resolve_account_name(req.account_number, req.bank_code, req.currency)
         account_name = resolved_account_name_from(result)
         payload = {
-            "accountName": account_name,
-            "bankCode": req.bank_code,
-            "bankName": bank.get("bankName") or bank.get("bank_name") or bank.get("name"),
+            "account_name": account_name,
+            "bank_code": req.bank_code,
+            "currency": req.currency,
+            "bank_name": bank.get("bankName") or bank.get("bank_name") or bank.get("name"),
             "raw": result,
         }
         set_output(span, payload, "application/json")
         return ResolveAccountResponse(
             accountName=account_name,
             bankCode=req.bank_code,
-            bankName=payload["bankName"],
+            currency=req.currency,
+            bankName=payload["bank_name"],
             raw=result if isinstance(result, dict) else {"raw": result},
         )
 

@@ -23,6 +23,22 @@ from .tools import TOOL_REGISTRY, model_to_dict
 
 CUSTOMER_ALLOWED_TOOLS = {"initiate_checkout"}
 MERCHANT_ALLOWED_TOOLS = {"initiate_checkout", "initiate_payout"}
+PUBLIC_ACTION_TO_TOOL = {
+    "create_checkout": "initiate_checkout",
+    "checkout": "initiate_checkout",
+    "create_payout": "initiate_payout",
+    "payout": "initiate_payout",
+}
+INTERNAL_RESPONSE_REPLACEMENTS = {
+    "initiate_checkout": "create a checkout",
+    "initiate_payout": "create a payout",
+    "tool_name": "action",
+    "tool call": "payment action",
+    "tool": "payment action",
+    "function call": "payment action",
+    "backend": "system",
+    "schema": "format",
+}
 
 
 conversation_store: Dict[str, Dict[str, Any]] = {}
@@ -191,6 +207,32 @@ def prompt_for_actor(actor_type: str) -> str:
     return CUSTOMER_AGENT_PROMPT
 
 
+def tool_name_from_decision(decision: Dict[str, Any]) -> Optional[str]:
+    action = decision.get("action")
+    if action is not None:
+        normalized = str(action).strip()
+        if normalized.lower() in {"", "null", "none"}:
+            return None
+        return PUBLIC_ACTION_TO_TOOL.get(normalized, normalized)
+
+    tool_name = decision.get("tool_name")
+    if tool_name is not None:
+        normalized = str(tool_name).strip()
+        if normalized.lower() in {"", "null", "none"}:
+            return None
+        return normalized
+
+    return None
+
+
+def sanitize_assistant_message(message: str) -> str:
+    sanitized = message or ""
+    for internal, public in INTERNAL_RESPONSE_REPLACEMENTS.items():
+        sanitized = sanitized.replace(internal, public)
+        sanitized = sanitized.replace(internal.title(), public)
+    return sanitized
+
+
 def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name == "initiate_checkout":
         return (
@@ -252,12 +294,15 @@ async def decide_next_step(messages: List[Dict[str, Any]], actor_type: str = "cu
         text = res.get("text", "") if isinstance(res, dict) else ""
         decision = parse_model_json(text)
 
+        tool_name = tool_name_from_decision(decision)
         normalized = {
             "intent": decision.get("intent", "unknown"),
-            "tool_name": decision.get("tool_name"),
+            "tool_name": tool_name,
             "arguments": decision.get("arguments") or {},
             "missing_fields": decision.get("missing_fields") or [],
-            "assistant_message": decision.get("assistant_message") or "Can you provide more details?",
+            "assistant_message": sanitize_assistant_message(
+                decision.get("assistant_message") or "Can you provide more details?"
+            ),
             "ready_to_call_tool": bool(decision.get("ready_to_call_tool")),
         }
         set_attributes(
