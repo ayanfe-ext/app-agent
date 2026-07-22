@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime
 import json
 from typing import Any, Callable, Dict, List, Optional, Type
 from urllib.parse import urljoin
@@ -468,6 +469,10 @@ async def fetch_checkout_by_source_reference(source_reference: Any) -> Dict[str,
 
 
 async def fetch_all_payouts(args: FetchAllPayoutsArgs) -> Dict[str, Any]:
+    """
+    Fetches payouts from Duplo and applies in-memory filtering on the top level items
+    based on the provided parameters (ignoring nested fee items).
+    """
     with start_span(
         "tool.duplo_all_payouts_lookup",
         {
@@ -475,7 +480,7 @@ async def fetch_all_payouts(args: FetchAllPayoutsArgs) -> Dict[str, Any]:
         },
     ) as span:
         set_span_kind(span, "tool")
-        set_input(span, {}, "application/json")
+        set_input(span, args.model_dump(), "application/json")
         if not settings.duplo_base_url:
             raise RuntimeError("Duplo base URL not configured")
 
@@ -502,11 +507,111 @@ async def fetch_all_payouts(args: FetchAllPayoutsArgs) -> Dict[str, Any]:
                 return result
 
             try:
-                result = resp.json()
+                raw_response = resp.json()
             except Exception:
                 result = {"text": resp.text}
-            set_output(span, result, "application/json")
-            return result
+                set_output(span, result, "application/json")
+                return result
+            
+        payouts: List[Dict[str, Any]] = (
+            raw_response.get("data")
+            or raw_response.get("raw", {}).get("data")
+            or []
+        )
+
+        def parse_date(date_str: Optional[str]) -> Optional[datetime]:
+            if not date_str:
+                return None
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"):
+                try:
+                    return datetime.strptime(date_str.strip(), fmt)
+                except ValueError:
+                    pass
+            return None
+        
+        has_time_from = " " in (args.created_at_from or "") or "T" in (args.created_at_from or "")
+        has_time_to = " " in (args.created_at_to or "") or "T" in (args.created_at_to or "")
+
+        exact_date = parse_date(args.created_at_exact)
+        from_date = parse_date(args.created_at_from)
+        to_date = parse_date(args.created_at_to)
+
+        # If no time was provided for 'from', start at 00:00:00
+        if from_date and not has_time_from:
+            from_date = from_date.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        # If no time was provided for 'to', end at 23:59:59 to include the whole day
+        if to_date and not has_time_to:
+            to_date = to_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+        
+
+        filtered_payouts = []
+        for item in payouts:
+            if args.recipient_account_name and args.recipient_account_name.lower() not in (item.get("recipientAccountName") or "").lower():
+                continue
+            if args.recipient_account_number and args.recipient_account_number != item.get("recipientAccountNumber"):
+                continue
+            if args.recipient_bank_name and args.recipient_bank_name.lower() not in (item.get("recipientBankName") or "").lower():
+                continue
+            if args.source_reference and args.source_reference != item.get("sourceReference"):
+                continue
+            if args.payment_channel and args.payment_channel.lower() != (item.get("paymentChannel") or "").lower():
+                continue
+            if args.session_id and args.session_id != item.get("sessionId"):
+                continue
+            if args.reference and args.reference != item.get("reference"):
+                continue
+            if args.status and args.status.lower() != (item.get("status") or "").lower():
+                continue
+            if args.narration and args.narration.lower() not in (item.get("narration") or "").lower():
+                continue
+
+            amount = item.get("amount", {})
+            amount_value = amount.get("value") if isinstance(amount, dict) else None
+
+            if args.min_amount is not None and (amount_value is None or amount_value < args.min_amount):
+                continue
+            if args.max_amount is not None and (amount_value is None or amount_value > args.max_amount):
+                continue
+            if args.currency and args.currency.upper() != (amount.get("currency") or "").upper():
+                continue
+
+            balance = item.get("balance", {})
+            balance_value = balance.get("value") if isinstance(balance, dict) else None
+            if args.min_balance is not None and (balance_value is None or balance_value < args.min_balance):
+                continue
+            if args.max_balance is not None and (balance_value is None or balance_value > args.max_balance):
+                continue
+
+            item_date = parse_date(item.get("createdAt"))
+            if item_date:
+                if exact_date:
+                    # If user supplied date-only for exact, compare date parts; otherwise compare full datetime
+                    has_time_exact = " " in (args.created_at_exact or "") or "T" in (args.created_at_exact or "")
+                    if not has_time_exact and item_date.date() != exact_date.date():
+                        continue
+                    elif has_time_exact and item_date != exact_date:
+                        continue
+
+                if from_date and item_date < from_date:
+                    continue
+                if to_date and item_date > to_date:
+                    continue
+
+            filtered_payouts.append(item)
+
+        result = {
+            "request_id": raw_response.get("requestId"),
+            "request_timestamp": raw_response.get("requestTimestamp"),
+            "status_code": raw_response.get("statusCode"),
+            "message": f"Fetched {len(filtered_payouts)} payouts after filtering",
+            "total_fetched": len(payouts),
+            "total_filtered": len(filtered_payouts),
+            "data": filtered_payouts,
+        }
+        set_output(span, result, "application/json")
+        return result
+
 
 async def initiate_checkout_handler(args: InitiateCheckoutArgs) -> Dict[str, Any]:
     with start_span("tool.handler.initiate_checkout", {"tool.name": "initiate_checkout"}) as span:
@@ -560,7 +665,7 @@ TOOL_REGISTRY = {
     ),
     "fetch_all_payouts": ToolDefinition(
         name="fetch_all_payouts",
-        description="Fetch all payout transactions associated with the merchant business",
+        description="Fetch all payout transactions associated with the merchant busines and filter them based on the provided parameters.",
         args_schema=FetchAllPayoutsArgs,
         handler=fetch_all_payouts,
         requires_confirmation=False,

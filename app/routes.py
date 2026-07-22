@@ -12,6 +12,7 @@ from app.schemas import (
     DuploPayoutLookupResponse,
     DuploPayoutsLookupResponse,
     DuploCheckoutLookupResponse,
+    FetchAllPayoutsArgs,
     ResolveAccountRequest,
     ResolveAccountResponse,
 )
@@ -316,7 +317,7 @@ async def merchant_checkout_lookup(source_reference: str):
 
 
 @router.get("/merchant/payout/transactions", response_model=DuploPayoutsLookupResponse, dependencies=[Depends(require_merchant_api_key), Depends(rate_limit)])
-async def merchant_all_payouts_lookup():
+async def merchant_all_payouts_lookup(args: FetchAllPayoutsArgs = Depends()):
     with start_span(
         "http.get.merchant_all_payouts_lookup",
         {
@@ -324,18 +325,18 @@ async def merchant_all_payouts_lookup():
         },
     ) as span:
         set_span_kind(span, "tool")
-        result = await fetch_all_payouts()
+        result = await fetch_all_payouts(args)
         data = result.get("data") if isinstance(result, dict) else None
 
         links = result.get("links") if isinstance(result, dict) else None
-        total = result.get("meta", {}).get("total") if isinstance(result, dict) else None
+        total = result.get("total_filtered") if isinstance(result, dict) else None
        
         response = DuploPayoutsLookupResponse(
-            requestId=result.get("requestId"),
-            requestTimestamp=result.get("requestTimestamp"),
+            requestId=result.get("request_id"),
+            requestTimestamp=result.get("request_timestamp"),
             message=result.get("message") or result.get("text"),
-            statusCode=result.get("statusCode"),
-            data=data if isinstance(data, dict) else None,
+            statusCode=result.get("status_code"),
+            data=data if isinstance(data, list) else None,
             raw=result if isinstance(result, dict) else {"raw": result},
             links=links,
             total=total,

@@ -161,14 +161,39 @@ class FetchCheckoutArgs(BaseModel):
     source_reference: str = Field(..., min_length=1)
 
 class FetchAllPayoutsArgs(BaseModel):
-    pass
+    # String / exact match filters
+    request_id: Optional[str] = None
+    request_timestamp: Optional[str] = None
+    status_code: Optional[int] = None
+    data: Optional[Dict[str, Any]] = None
+    recipient_account_name: Optional[str] = Field(None, description="Filter by recipient account name (case-insensitive search)")
+    recipient_account_number: Optional[str] = Field(None, description="Filter by exact recipient account number")
+    recipient_bank_name: Optional[str] = Field(None, description="Filter by recipient bank name (case-insensitive search)")
+    source_reference: Optional[str] = Field(None, description="Filter by exact source reference")
+    payment_channel: Optional[str] = Field(None, description="Filter by payment channel, e.g., 'Bank Transfer'")
+    session_id: Optional[str] = Field(None, description="Filter by exact session ID")
+    reference: Optional[str] = Field(None, description="Filter by exact transaction reference (TRN_...)")
+    status: Optional[str] = Field(None, description="Filter by status, e.g., 'Successful'")
+    narration: Optional[str] = Field(None, description="Filter by narration text (case-insensitive search)")
+
+    # Amount & Balance filters
+    min_amount: Optional[float] = Field(None, description="Minimum payout amount")
+    max_amount: Optional[float] = Field(None, description="Maximum payout amount")
+    currency: Optional[str] = Field(None, description="Currency code, e.g., 'NGN'")
+    min_balance: Optional[float] = Field(None, description="Minimum wallet balance after payout")
+    max_balance: Optional[float] = Field(None, description="Maximum wallet balance after payout")
+
+    # Date filters
+    created_at_exact: Optional[str] = Field(None, description="Exact creation timestamp (YYYY-MM-DD HH:MM:SS)")
+    created_at_from: Optional[str] = Field(None, description="Start date/timestamp range (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
+    created_at_to: Optional[str] = Field(None, description="End date/timestamp range (YYYY-MM-DD or YYYY-MM-DD HH:MM:SS)")
 
 class DuploPayoutsLookupResponse(BaseModel):
     requestId: Optional[str] = None
     requestTimestamp: Optional[str] = None
     message: Optional[str] = None
     statusCode: Optional[int] = None
-    data: Optional[Dict[str, Any]] = None
+    data: Optional[List[Dict[str, Any]]] = None
     raw: Optional[Dict[str, Any]] = None
     links: Optional[Dict[str, Any]] = None
     total: Optional[int] = None

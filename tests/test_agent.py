@@ -87,6 +87,45 @@ def test_conversation_state_persists_between_cache_resets():
     assert agent.conversation_store[cid]["messages"][0]["content"] == "hello"
 
 
+def test_infers_payout_history_filter_from_lower_than_query():
+    decision = agent.infer_payout_history_decision(
+        [{"role": "user", "content": "give me payouts lower than NGN 2000"}]
+    )
+
+    assert decision["tool_name"] == "fetch_all_payouts"
+    assert decision["ready_to_call_tool"] is True
+    assert decision["arguments"] == {"currency": "NGN", "max_amount": 2000.0}
+
+
+def test_infers_payout_history_filter_from_between_query():
+    decision = agent.infer_payout_history_decision(
+        [{"role": "user", "content": "show payouts between NGN 2000 and NGN 10000"}]
+    )
+
+    assert decision["tool_name"] == "fetch_all_payouts"
+    assert decision["arguments"] == {
+        "currency": "NGN",
+        "min_amount": 2000.0,
+        "max_amount": 10000.0,
+    }
+
+
+def test_maps_public_actions_to_internal_tool_names():
+    assert agent.tool_name_from_decision({"action": "create_checkout"}) == "initiate_checkout"
+    assert agent.tool_name_from_decision({"action": "create_payout"}) == "initiate_payout"
+    assert agent.tool_name_from_decision({"action": "fetch_all_payouts"}) == "fetch_all_payouts"
+
+
+def test_sanitizes_internal_names_from_assistant_message():
+    message = agent.sanitize_assistant_message(
+        "I can use initiate_payout with a tool call, but not tool_name directly."
+    )
+
+    assert "initiate_payout" not in message
+    assert "tool_name" not in message
+    assert "tool call" not in message
+
+
 @pytest.mark.asyncio
 async def test_process_conversation_collects_when_model_needs_details(monkeypatch):
     async def fake_decide_next_step(messages, actor_type="customer"):
@@ -108,6 +147,44 @@ async def test_process_conversation_collects_when_model_needs_details(monkeypatc
 
     assert res["status"] == "collecting"
     assert res["assistant_message"] == "How much should be paid out?"
+
+
+@pytest.mark.asyncio
+async def test_merchant_history_fallback_executes_when_model_hesitates(monkeypatch):
+    async def fake_decide_next_step(messages, actor_type="customer"):
+        return agent.apply_merchant_history_fallback(
+            messages,
+            {
+                "intent": "general_chat",
+                "tool_name": None,
+                "arguments": {},
+                "missing_fields": [],
+                "assistant_message": "I cannot fetch that.",
+                "ready_to_call_tool": False,
+            },
+            actor_type,
+        )
+
+    async def fake_handler(args):
+        return {
+            "message": "Fetched 1 payouts after filtering",
+            "data": [{"amount": {"value": 1000, "currency": "NGN"}}],
+        }
+
+    original_handler = TOOL_REGISTRY["fetch_all_payouts"].handler
+    TOOL_REGISTRY["fetch_all_payouts"].handler = fake_handler
+    monkeypatch.setattr(agent, "decide_next_step", fake_decide_next_step)
+
+    try:
+        cid = agent._ensure_conversation("merchant-history")
+        agent.append_message(cid, {"role": "user", "content": "give me payouts lower than NGN 2000"})
+
+        res = await agent.process_conversation(cid, actor_type="merchant")
+
+        assert res["status"] == "completed"
+        assert res["tool_result"]["data"][0]["amount"]["value"] == 1000
+    finally:
+        TOOL_REGISTRY["fetch_all_payouts"].handler = original_handler
 
 
 @pytest.mark.asyncio

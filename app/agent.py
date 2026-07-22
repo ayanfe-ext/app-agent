@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +31,10 @@ PUBLIC_ACTION_TO_TOOL = {
     "payout": "initiate_payout",
     "fetch_checkout": "fetch_checkout",
     "fetch_all_payouts": "fetch_all_payouts",
+    "fetch_payouts": "fetch_all_payouts",
+    "list_payouts": "fetch_all_payouts",
+    "search_payouts": "fetch_all_payouts",
+    "get_payouts": "fetch_all_payouts",
 }
 INTERNAL_RESPONSE_REPLACEMENTS = {
     "initiate_checkout": "create a checkout",
@@ -237,6 +242,97 @@ def sanitize_assistant_message(message: str) -> str:
     return sanitized
 
 
+def _latest_user_message(messages: List[Dict[str, Any]]) -> str:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return message.get("content", "")
+    return ""
+
+
+def _parse_amount_token(value: str) -> Optional[float]:
+    try:
+        return float(value.replace(",", ""))
+    except Exception:
+        return None
+
+
+def _first_amount(text: str) -> Optional[float]:
+    match = re.search(r"(?:ngn|naira|₦)?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:ngn|naira)?", text, re.IGNORECASE)
+    if not match:
+        return None
+    return _parse_amount_token(match.group(1))
+
+
+def infer_payout_history_decision(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    text = _latest_user_message(messages)
+    normalized = text.lower()
+    if not re.search(r"\bpayouts?\b|\bdisbursements?\b|\boutflows?\b", normalized):
+        return None
+
+    args: Dict[str, Any] = {}
+    if re.search(r"\bngn\b|\bnaira\b|₦", normalized):
+        args["currency"] = "NGN"
+
+    between = re.search(
+        r"\bbetween\b\s*(?:ngn|naira|₦)?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:and|-|to)\s*(?:ngn|naira|₦)?\s*([0-9][0-9,]*(?:\.\d+)?)",
+        text,
+        re.IGNORECASE,
+    )
+    if between:
+        first = _parse_amount_token(between.group(1))
+        second = _parse_amount_token(between.group(2))
+        if first is not None and second is not None:
+            args["min_amount"] = min(first, second)
+            args["max_amount"] = max(first, second)
+    else:
+        amount = _first_amount(text)
+        if amount is not None and re.search(r"\blower than\b|\bbelow\b|\bunder\b|\bless than\b|\bnot more than\b|<", normalized):
+            args["max_amount"] = amount
+        elif amount is not None and re.search(r"\babove\b|\bover\b|\bgreater than\b|\bmore than\b|\bat least\b|>", normalized):
+            args["min_amount"] = amount
+
+    if "successful" in normalized or "success" in normalized:
+        args["status"] = "Successful"
+    elif "failed" in normalized or "failure" in normalized:
+        args["status"] = "Failed"
+    elif "pending" in normalized:
+        args["status"] = "Pending"
+
+    return {
+        "intent": "payout",
+        "tool_name": "fetch_all_payouts",
+        "arguments": args,
+        "missing_fields": [],
+        "assistant_message": "I will fetch the matching payouts.",
+        "ready_to_call_tool": True,
+    }
+
+
+def apply_merchant_history_fallback(
+    messages: List[Dict[str, Any]],
+    normalized_decision: Dict[str, Any],
+    actor_type: str,
+) -> Dict[str, Any]:
+    if actor_type != "merchant":
+        return normalized_decision
+
+    inferred = infer_payout_history_decision(messages)
+    if not inferred:
+        return normalized_decision
+
+    tool_name = normalized_decision.get("tool_name")
+    if tool_name and tool_name != "fetch_all_payouts":
+        return normalized_decision
+
+    if tool_name == "fetch_all_payouts" and normalized_decision.get("ready_to_call_tool"):
+        merged = dict(inferred["arguments"])
+        merged.update(normalized_decision.get("arguments") or {})
+        normalized_decision["arguments"] = merged
+        return normalized_decision
+
+    return inferred
+
+
 def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name == "initiate_checkout":
         return (
@@ -309,6 +405,7 @@ async def decide_next_step(messages: List[Dict[str, Any]], actor_type: str = "cu
             ),
             "ready_to_call_tool": bool(decision.get("ready_to_call_tool")),
         }
+        normalized = apply_merchant_history_fallback(messages, normalized, actor_type)
         set_attributes(
             span,
             {
