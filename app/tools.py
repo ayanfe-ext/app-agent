@@ -25,6 +25,15 @@ def model_to_dict(model: BaseModel) -> Dict[str, Any]:
     return model.dict()
 
 
+def duplo_headers(source_reference: Optional[str] = None) -> Dict[str, str]:
+    headers = {"Content-Type": "application/json"}
+    if settings.duplo_api_key:
+        headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+    if source_reference:
+        headers["Idempotency-Key"] = str(source_reference)
+    return headers
+
+
 async def retry_async(call, retries: int = 3, delay: float = 0.25):
     with start_span("tool.retry_async", {"retry.max_attempts": retries}) as span:
         set_span_kind(span, "chain")
@@ -67,24 +76,14 @@ async def call_duplo_checkout(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not settings.duplo_checkout_url:
             raise RuntimeError("Duplo checkout URL not configured")
 
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
-        if payload.get("source_reference"):
-            headers["Idempotency-Key"] = str(payload["source_reference"])
+        headers = duplo_headers(payload.get("source_reference"))
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                print(f"[agent] POST {settings.duplo_checkout_url} -> payload: {json.dumps(payload, ensure_ascii=False)}")
-            except Exception:
-                print(f"[agent] POST {settings.duplo_checkout_url} -> payload: {payload}")
-
             try:
                 resp = await retry_async(
                     lambda: client.post(settings.duplo_checkout_url, json=payload, headers=headers, follow_redirects=False)
                 )
             except Exception as exc:
-                print(f"[agent] request error when posting to {settings.duplo_checkout_url}: {exc}")
                 set_attributes(span, {"tool.success": False, "error.type": type(exc).__name__})
                 result = {"error": str(exc)}
                 set_output(span, result, "application/json")
@@ -96,19 +95,12 @@ async def call_duplo_checkout(payload: Dict[str, Any]) -> Dict[str, Any]:
                     new_url = urljoin(settings.duplo_checkout_url, loc)
                     add_event(span, "http.redirect", {"http.status_code": resp.status_code})
                     try:
-                        print(f"[agent] following redirect to {new_url}")
                         resp = await retry_async(lambda: client.post(new_url, json=payload, headers=headers, follow_redirects=False))
                     except Exception as exc:
-                        print(f"[agent] request error when posting to {new_url}: {exc}")
                         set_attributes(span, {"tool.success": False, "error.type": type(exc).__name__})
                         result = {"error": str(exc)}
                         set_output(span, result, "application/json")
                         return result
-
-            try:
-                print(f"[agent] response: status={resp.status_code}, body={resp.text}")
-            except Exception:
-                pass
 
             set_attribute(span, "http.status_code", resp.status_code)
             try:
@@ -145,9 +137,7 @@ async def resolve_account_name(account_number: str, bank_code: str, currency: st
         if not settings.duplo_base_url:
             raise RuntimeError("Duplo base URL not configured")
 
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+        headers = duplo_headers()
 
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
@@ -159,15 +149,7 @@ async def resolve_account_name(account_number: str, bank_code: str, currency: st
             set_attribute(span, "http.status_code", resp.status_code)
 
             if resp.status_code != 200:
-                try:
-                    set_output(span, {"error_body": resp.text}, "application/json")
-                except Exception:
-                    pass
-                # keep a console log for quick debugging
-                try:
-                    print(f"[agent] name-enquiry failed: status={resp.status_code}, body={resp.text}")
-                except Exception:
-                    pass
+                set_output(span, {"error_body": resp.text}, "application/json")
 
             resp.raise_for_status()
             result = resp.json()
@@ -185,9 +167,7 @@ async def fetch_banks(currency: str) -> List[Dict[str, Any]]:
         if not settings.duplo_base_url:
             raise RuntimeError("Duplo base URL not configured")
 
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+        headers = duplo_headers()
 
         url = f"{settings.duplo_base_url}/banking/banks/{currency}"
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -270,15 +250,8 @@ async def prepare_payout_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         resolved = await resolve_account_name(prepared["account_number"], str(prepared["bank_code"]), str(prepared["currency"]))
         
-        try:
-            print(f"[agent] name-enquiry resolved response: {resolved}")
-        except Exception:
-            pass
-        
         account_name = resolved_account_name_from(resolved)
-        print(f"[agent] resolved account name: {account_name}")
         if not account_name:
-            print(f"[agent] unable to resolve account name from response: {resolved}")
             raise ValueError("Unable to resolve account name")
         
 
@@ -315,24 +288,14 @@ async def call_duplo_payout(payload: Dict[str, Any]) -> Dict[str, Any]:
         if not settings.duplo_payout_url:
             raise RuntimeError("Duplo Payout URL is not configured yet")
         
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
-        if payload.get("source_reference"):
-            headers["Idempotency-Key"] = str(payload["source_reference"])
+        headers = duplo_headers(payload.get("source_reference"))
 
         async with httpx.AsyncClient(timeout=30.0) as client:
-            try:
-                print(f"[agent] POST {settings.duplo_payout_url} -> payload: {json.dumps(payload, ensure_ascii=False)}")
-            except Exception:
-                print(f"[agent] POST {settings.duplo_payout_url} -> payload: {payload}")
-
             try:
                 resp = await retry_async(
                     lambda: client.post(settings.duplo_payout_url, json=payload, headers=headers, follow_redirects=False)
                 )
             except Exception as exc:
-                print(f"[agent] request to {settings.duplo_payout_url} failed: {exc}")
                 set_attributes(span, {"tool.success": False, "error.type": type(exc).__name__})
                 result = {"error": str(exc)}
                 set_output(span, result, "application/json")
@@ -344,21 +307,14 @@ async def call_duplo_payout(payload: Dict[str, Any]) -> Dict[str, Any]:
                     new_url = urljoin(settings.duplo_payout_url, loc)
                     add_event(span, "http.redirect", {"http.status_code": resp.status_code})
                     try:
-                        print(f"[agent] following redirect to {new_url}")
                         resp = await retry_async(
                             lambda: client.post(new_url, json=payload, headers=headers, follow_redirects=False)
                     )
                     except Exception as exc:
-                        print(f"[agent] request to {new_url} failed: {exc}")
                         set_attributes(span, {"tool.success": False, "error.type": type(exc).__name__})
                         result = {"error": str(exc)}
                         set_output(span, result, "application/json")
                         return result
-
-        try:
-            print(f"[agent] response: status={resp.status_code}, body={resp.text}")
-        except Exception as exc:
-            pass
 
         set_attribute(span, "http.status_code", resp.status_code)
         try:
@@ -391,11 +347,47 @@ async def fetch_payout_by_source_reference(source_reference: str) -> Dict[str, A
         if not settings.duplo_base_url:
             raise RuntimeError("Duplo base URL not configured")
 
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+        headers = duplo_headers()
 
         url = f"{settings.duplo_base_url}/payout/transaction-by-source-reference/{source_reference}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            try:
+                resp = await retry_async(lambda: client.get(url, headers=headers, follow_redirects=False))
+            except Exception as exc:
+                set_attributes(span, {"tool.success": False, "error.type": type(exc).__name__})
+                result = {"error": str(exc)}
+                set_output(span, result, "application/json")
+                return result
+
+            set_attribute(span, "http.status_code", resp.status_code)
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError:
+                result = {"status_code": resp.status_code, "text": resp.text}
+                set_output(span, result, "application/json")
+                return result
+
+            try:
+                result = resp.json()
+            except Exception:
+                result = {"text": resp.text}
+            set_output(span, result, "application/json")
+            return result
+
+
+async def fetch_transaction_by_reference(reference: str) -> Dict[str, Any]:
+    with start_span(
+        "tool.duplo_transaction_lookup",
+        {"tool.name": "fetch_transaction_by_reference", "transaction.reference": reference},
+    ) as span:
+        set_span_kind(span, "tool")
+        set_input(span, {"reference": reference}, "application/json")
+        if not settings.duplo_base_url:
+            raise RuntimeError("Duplo base URL not configured")
+
+        headers = duplo_headers()
+
+        url = f"{settings.duplo_base_url}/transaction/find-by-reference/{reference}"
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await retry_async(lambda: client.get(url, headers=headers, follow_redirects=False))
@@ -438,9 +430,7 @@ async def fetch_checkout_by_source_reference(source_reference: Any) -> Dict[str,
         if not settings.duplo_base_url:
             raise RuntimeError("Duplo base URL not configured")
 
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+        headers = duplo_headers()
 
         url = f"{settings.duplo_base_url}/checkout/transactions/source-reference/{source_reference}"
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -484,9 +474,7 @@ async def fetch_all_payouts(args: FetchAllPayoutsArgs) -> Dict[str, Any]:
         if not settings.duplo_base_url:
             raise RuntimeError("Duplo base URL not configured")
 
-        headers = {"Content-Type": "application/json"}
-        if settings.duplo_api_key:
-            headers["Authorization"] = f"Bearer {settings.duplo_api_key}"
+        headers = duplo_headers()
 
         url = f"{settings.duplo_base_url}/payout"
         async with httpx.AsyncClient(timeout=30.0) as client:

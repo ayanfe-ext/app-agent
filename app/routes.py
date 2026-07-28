@@ -1,10 +1,10 @@
 from fastapi import APIRouter, Depends, Cookie, Header, HTTPException, Request, Response
-from typing import Any, Dict, List, Optional
+from typing import Dict, List
 import time
 
 from app import agent
 from app.schemas import (
-    BankInfo,
+    AtlasWebhookPayload,
     ConversationRequest,
     ConversationResponse,
     DuploPayoutRequest,
@@ -13,21 +13,28 @@ from app.schemas import (
     DuploPayoutsLookupResponse,
     DuploCheckoutLookupResponse,
     FetchAllPayoutsArgs,
+    LoginRequest,
+    PayoutStatusResponse,
     ResolveAccountRequest,
     ResolveAccountResponse,
+    TokenResponse,
+    WebhookEventResponse,
 )
 
 router = APIRouter()
 
 from .config import settings
-import httpx
-from .observability import add_event, set_attribute, set_attributes, set_input, set_output, set_span_kind, start_span
+from .auth import create_access_token, require_customer_access, require_merchant_access
+from .memory import load_webhook_event, save_webhook_event
+from .observability import set_attributes, set_input, set_output, set_span_kind, start_span
 from .tools import (
     call_duplo_payout,
     fetch_banks,
     fetch_payout_by_source_reference,
     fetch_all_payouts,
     fetch_checkout_by_source_reference,
+    fetch_transaction_by_reference,
+    bank_name_from,
     match_bank,
     prepare_payout_payload,
     resolve_account_name,
@@ -36,24 +43,26 @@ from .tools import (
 
 
 rate_limit_store: Dict[str, List[float]] = {}
+PAYOUT_TERMINAL_EVENTS = {"OUT_FLOW_SUCCESS_EVENT", "OUT_FLOW_FAILED_EVENT"}
+PAYOUT_WEBHOOK_EVENTS = {"OUT_FLOW_PENDING_EVENT", "OUT_FLOW_SUCCESS_EVENT", "OUT_FLOW_FAILED_EVENT"}
 
 
-async def require_api_key(x_api_key: str = Header(default="")):
-    with start_span("http.auth.require_api_key", {"auth.enabled": bool(settings.app_api_key)}) as span:
-        set_span_kind(span, "guardrail")
-        set_input(span, {"auth_enabled": bool(settings.app_api_key)}, "application/json")
-        if settings.app_api_key and x_api_key != settings.app_api_key:
-            raise HTTPException(status_code=401, detail="Invalid API key")
-        set_output(span, {"authorized": True}, "application/json")
+def model_payload(model):
+    if hasattr(model, "model_dump"):
+        return model.model_dump()
+    return model.dict()
 
 
-async def require_merchant_api_key(x_api_key: str = Header(default="")):
-    with start_span("http.auth.require_merchant_api_key", {"auth.merchant_enabled": bool(settings.merchant_api_key)}) as span:
-        set_span_kind(span, "guardrail")
-        set_input(span, {"merchant_enabled": bool(settings.merchant_api_key)}, "application/json")
-        if not settings.merchant_api_key or x_api_key != settings.merchant_api_key:
-            raise HTTPException(status_code=401, detail="Invalid merchant API key")
-        set_output(span, {"authorized": True}, "application/json")
+def terminal_status_from_event(event_type: str) -> bool:
+    return event_type in PAYOUT_TERMINAL_EVENTS
+
+
+async def require_api_key(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    return await require_customer_access(x_api_key=x_api_key, authorization=authorization)
+
+
+async def require_merchant_api_key(x_api_key: str = Header(default=""), authorization: str = Header(default="")):
+    return await require_merchant_access(x_api_key=x_api_key, authorization=authorization)
 
 
 async def rate_limit(request: Request, x_api_key: str = Header(default="")):
@@ -81,6 +90,25 @@ async def rate_limit(request: Request, x_api_key: str = Header(default="")):
         recent.append(now)
         rate_limit_store[identity] = recent
         set_output(span, {"allowed": True, "used": len(recent)}, "application/json")
+
+
+@router.post("/auth/login", response_model=TokenResponse)
+async def login(req: LoginRequest):
+    with start_span("http.post.auth_login", {"actor.type": req.actor_type}) as span:
+        set_span_kind(span, "guardrail")
+        set_input(span, {"actor_type": req.actor_type}, "application/json")
+        expected_key = settings.merchant_api_key if req.actor_type == "merchant" else settings.app_api_key
+        if not expected_key or req.access_key != expected_key:
+            raise HTTPException(status_code=401, detail="Invalid login credentials")
+
+        token = create_access_token(req.actor_type)
+        response = TokenResponse(
+            access_token=token,
+            actor_type=req.actor_type,
+            expires_in=settings.jwt_exp_minutes * 60,
+        )
+        set_output(span, {"authorized": True, "actor_type": req.actor_type}, "application/json")
+        return response
 
 
 async def _run_conversation(
@@ -168,7 +196,6 @@ async def get_banks():
         except Exception as exc:
             set_attributes(span, {"http.success": False, "error.type": type(exc).__name__})
             result = {"error": str(exc)}
-            print(f"[agent] error fetching banks: {exc}")
             set_output(span, result, "application/json")
             return result
         set_output(span, result, "application/json")
@@ -198,7 +225,7 @@ async def merchant_resolve_account(req: ResolveAccountRequest):
             "account_name": account_name,
             "bank_code": req.bank_code,
             "currency": req.currency,
-            "bank_name": bank.get("bankName") or bank.get("bank_name") or bank.get("name"),
+            "bank_name": bank_name_from(bank),
             "raw": result,
         }
         set_output(span, payload, "application/json")
@@ -226,8 +253,8 @@ async def merchant_payout(
         },
     ) as span:
         set_span_kind(span, "tool")
-        set_input(span, req.model_dump() if hasattr(req, "model_dump") else req.dict(), "application/json")
-        payload = req.model_dump() if hasattr(req, "model_dump") else req.dict()
+        set_input(span, model_payload(req), "application/json")
+        payload = model_payload(req)
         payload = agent.ensure_backend_source_reference("merchant_payout", "initiate_payout", payload)
         try:
             payload = await prepare_payout_payload(payload)
@@ -275,6 +302,52 @@ async def merchant_payout_lookup(source_reference: str):
             data=data if isinstance(data, dict) else None,
             raw=result if isinstance(result, dict) else {"raw": result},
             sourceReference=(data or {}).get("sourceReference") if isinstance(data, dict) else source_reference,
+        )
+        set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
+        return response
+
+
+@router.get("/merchant/payout/status/{source_reference}", response_model=PayoutStatusResponse, dependencies=[Depends(require_merchant_api_key), Depends(rate_limit)])
+async def merchant_payout_status(source_reference: str):
+    with start_span(
+        "http.get.merchant_payout_status",
+        {"http.route": "/merchant/payout/status/{source_reference}", "payout.source_reference": source_reference},
+    ) as span:
+        set_span_kind(span, "tool")
+        set_input(span, {"source_reference": source_reference}, "application/json")
+        lookup = await fetch_payout_by_source_reference(source_reference)
+        data = lookup.get("data") if isinstance(lookup, dict) else None
+        reference = data.get("reference") if isinstance(data, dict) else None
+        webhook = load_webhook_event(reference) if reference else None
+        status = None
+        status_source = None
+        terminal = False
+        if webhook and webhook.get("status"):
+            status = webhook.get("status")
+            status_source = "webhook"
+            terminal = terminal_status_from_event(str(webhook.get("event_type") or ""))
+        elif isinstance(data, dict):
+            status = data.get("status")
+            status_source = "atlas_lookup"
+            terminal = str(status or "").lower() in {"successful", "success", "failed"}
+
+        response = PayoutStatusResponse(
+            sourceReference=source_reference,
+            reference=reference,
+            status=status,
+            statusSource=status_source,
+            terminal=terminal,
+            lookup=lookup if isinstance(lookup, dict) else {"raw": lookup},
+            webhook=webhook,
+        )
+        set_attributes(
+            span,
+            {
+                "payout.reference": reference or "",
+                "payout.status": status or "",
+                "payout.status_source": status_source or "",
+                "payout.terminal": terminal,
+            },
         )
         set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
         return response
@@ -345,19 +418,98 @@ async def merchant_all_payouts_lookup(args: FetchAllPayoutsArgs = Depends()):
         return response
 
 
-@router.post("/merchant/payout/webhook")
-async def merchant_payout_webhook(payload: Dict[str, Any]):
+async def _verify_payout_webhook(reference: str) -> bool:
     with start_span(
-        "http.post.merchant_payout_webhook",
-        {"http.route": "/merchant/payout/webhook", "event_type": payload.get("event_type")},
+        "webhook.verify_payout_reference",
+        {"payout.reference": reference, "webhook.verify_enabled": settings.atlas_webhook_verify},
+    ) as span:
+        set_span_kind(span, "guardrail")
+        set_input(span, {"reference": reference}, "application/json")
+        if not settings.atlas_webhook_verify:
+            set_output(span, {"verified": True, "mode": "disabled"}, "application/json")
+            return True
+        result = await fetch_transaction_by_reference(reference)
+        data = result.get("data") if isinstance(result, dict) else None
+        verified = bool(data)
+        set_output(span, {"verified": verified}, "application/json")
+        return verified
+
+
+@router.get("/merchant/payout/webhook-events/{reference}", response_model=WebhookEventResponse, dependencies=[Depends(require_merchant_api_key), Depends(rate_limit)])
+async def merchant_payout_webhook_event(reference: str):
+    with start_span(
+        "http.get.merchant_payout_webhook_event",
+        {"http.route": "/merchant/payout/webhook-events/{reference}", "payout.reference": reference},
     ) as span:
         set_span_kind(span, "tool")
-        set_input(span, payload, "application/json")
-        set_output(span, {"received": True}, "application/json")
-        return {"received": True}
+        set_input(span, {"reference": reference}, "application/json")
+        event = load_webhook_event(reference)
+        if not event:
+            raise HTTPException(status_code=404, detail="Webhook event not found")
+        response = WebhookEventResponse(
+            reference=reference,
+            eventType=event["event_type"],
+            status=event.get("status"),
+            duplicate=False,
+            terminal=event["event_type"] in PAYOUT_TERMINAL_EVENTS,
+            data=event["payload"],
+        )
+        set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
+        return response
+
+
+@router.post("/merchant/payout/webhook", response_model=WebhookEventResponse)
+async def merchant_payout_webhook(payload: AtlasWebhookPayload):
+    with start_span(
+        "http.post.merchant_payout_webhook",
+        {"http.route": "/merchant/payout/webhook", "event_type": payload.event_type},
+    ) as span:
+        set_span_kind(span, "tool")
+        body = payload.model_dump() if hasattr(payload, "model_dump") else payload.dict()
+        set_input(span, body, "application/json")
+        if payload.event_type not in PAYOUT_WEBHOOK_EVENTS:
+            raise HTTPException(status_code=400, detail="Unsupported payout webhook event")
+
+        reference = str(payload.data.get("reference") or "")
+        if not reference:
+            raise HTTPException(status_code=400, detail="Webhook payload missing data.reference")
+
+        verified = await _verify_payout_webhook(reference)
+        if not verified:
+            raise HTTPException(status_code=401, detail="Invalid webhook source")
+
+        status = payload.data.get("status")
+        existing = load_webhook_event(reference)
+        if existing and existing["event_type"] in PAYOUT_TERMINAL_EVENTS:
+            response = WebhookEventResponse(
+                reference=reference,
+                eventType=existing["event_type"],
+                status=existing.get("status"),
+                duplicate=True,
+                terminal=terminal_status_from_event(existing["event_type"]),
+                data=existing["payload"].get("data", existing["payload"]),
+            )
+            set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
+            return response
+
+        save_result = save_webhook_event(reference, payload.event_type, status, body)
+        response = WebhookEventResponse(
+            reference=reference,
+            eventType=payload.event_type,
+            status=status,
+            duplicate=bool(save_result.get("duplicate")),
+            terminal=terminal_status_from_event(payload.event_type),
+            data=payload.data,
+        )
+        set_output(span, response.model_dump() if hasattr(response, "model_dump") else response.dict(), "application/json")
+        return response
 
 
 
 @router.get("/health")
 async def health():
-    return {"status": "ok"}  
+    with start_span("http.get.health", {"http.route": "/health"}) as span:
+        set_span_kind(span, "chain")
+        result = {"status": "ok"}
+        set_output(span, result, "application/json")
+        return result

@@ -150,6 +150,30 @@ async def test_process_conversation_collects_when_model_needs_details(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_process_conversation_returns_greeting_for_simple_chat(monkeypatch):
+    async def fake_decide_next_step(messages, actor_type="customer"):
+        return {
+            "intent": "general_chat",
+            "tool_name": None,
+            "arguments": {},
+            "missing_fields": [],
+            "assistant_message": "",
+            "ready_to_call_tool": False,
+        }
+
+    monkeypatch.setattr(agent, "decide_next_step", fake_decide_next_step)
+
+    cid = agent._ensure_conversation("greeting-1")
+    agent.append_message(cid, {"role": "user", "content": "Hi"})
+
+    res = await agent.process_conversation(cid)
+
+    assert res["status"] == "collecting"
+    assert "help" in res["assistant_message"].lower()
+    assert "provide more details" not in res["assistant_message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_merchant_history_fallback_executes_when_model_hesitates(monkeypatch):
     async def fake_decide_next_step(messages, actor_type="customer"):
         return agent.apply_merchant_history_fallback(
@@ -305,3 +329,5 @@ async def test_process_conversation_executes_confirmed_tool(monkeypatch):
         assert agent.conversation_store[cid]["pending_tool_call"] is None
     finally:
         TOOL_REGISTRY["initiate_checkout"].handler = original_handler
+
+

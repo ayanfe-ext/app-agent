@@ -17,3 +17,4 @@ opentelemetry-exporter-otlp-proto-grpc>=1.25.0
 openinference-instrumentation-groq>=0.1.0
 openinference-instrumentation-openai>=0.1.0
 openinference-semantic-conventions>=0.1.0
+PyJWT>=2.8.0

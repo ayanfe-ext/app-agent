@@ -8,6 +8,18 @@ class ChatMessage(BaseModel):
     content: str
 
 
+class LoginRequest(BaseModel):
+    actor_type: str = Field(..., pattern="^(customer|merchant)$")
+    access_key: str = Field(..., min_length=1)
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    actor_type: str
+    expires_in: int
+
+
 class ConversationRequest(BaseModel):
     conversation_id: Optional[str] = None
     message: ChatMessage
@@ -197,3 +209,27 @@ class DuploPayoutsLookupResponse(BaseModel):
     raw: Optional[Dict[str, Any]] = None
     links: Optional[Dict[str, Any]] = None
     total: Optional[int] = None
+
+
+class AtlasWebhookPayload(BaseModel):
+    event_type: str = Field(..., min_length=1)
+    data: Dict[str, Any]
+
+
+class WebhookEventResponse(BaseModel):
+    reference: str
+    eventType: str
+    status: Optional[str] = None
+    duplicate: bool = False
+    terminal: bool = False
+    data: Dict[str, Any]
+
+
+class PayoutStatusResponse(BaseModel):
+    sourceReference: str
+    reference: Optional[str] = None
+    status: Optional[str] = None
+    statusSource: Optional[str] = None
+    terminal: bool = False
+    lookup: Optional[Dict[str, Any]] = None
+    webhook: Optional[Dict[str, Any]] = None

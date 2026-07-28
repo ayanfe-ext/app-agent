@@ -31,10 +31,6 @@ PUBLIC_ACTION_TO_TOOL = {
     "payout": "initiate_payout",
     "fetch_checkout": "fetch_checkout",
     "fetch_all_payouts": "fetch_all_payouts",
-    "fetch_payouts": "fetch_all_payouts",
-    "list_payouts": "fetch_all_payouts",
-    "search_payouts": "fetch_all_payouts",
-    "get_payouts": "fetch_all_payouts",
 }
 INTERNAL_RESPONSE_REPLACEMENTS = {
     "initiate_checkout": "create a checkout",
@@ -242,95 +238,15 @@ def sanitize_assistant_message(message: str) -> str:
     return sanitized
 
 
-def _latest_user_message(messages: List[Dict[str, Any]]) -> str:
-    for message in reversed(messages):
-        if message.get("role") == "user":
-            return message.get("content", "")
-    return ""
+def default_assistant_message(decision: Dict[str, Any]) -> str:
+    assistant_message = decision.get("assistant_message")
+    if assistant_message:
+        return sanitize_assistant_message(assistant_message)
 
+    if tool_name_from_decision(decision) is None:
+        return "Hi there! How can I help you today?"
 
-def _parse_amount_token(value: str) -> Optional[float]:
-    try:
-        return float(value.replace(",", ""))
-    except Exception:
-        return None
-
-
-def _first_amount(text: str) -> Optional[float]:
-    match = re.search(r"(?:ngn|naira|₦)?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:ngn|naira)?", text, re.IGNORECASE)
-    if not match:
-        return None
-    return _parse_amount_token(match.group(1))
-
-
-def infer_payout_history_decision(messages: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    text = _latest_user_message(messages)
-    normalized = text.lower()
-    if not re.search(r"\bpayouts?\b|\bdisbursements?\b|\boutflows?\b", normalized):
-        return None
-
-    args: Dict[str, Any] = {}
-    if re.search(r"\bngn\b|\bnaira\b|₦", normalized):
-        args["currency"] = "NGN"
-
-    between = re.search(
-        r"\bbetween\b\s*(?:ngn|naira|₦)?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(?:and|-|to)\s*(?:ngn|naira|₦)?\s*([0-9][0-9,]*(?:\.\d+)?)",
-        text,
-        re.IGNORECASE,
-    )
-    if between:
-        first = _parse_amount_token(between.group(1))
-        second = _parse_amount_token(between.group(2))
-        if first is not None and second is not None:
-            args["min_amount"] = min(first, second)
-            args["max_amount"] = max(first, second)
-    else:
-        amount = _first_amount(text)
-        if amount is not None and re.search(r"\blower than\b|\bbelow\b|\bunder\b|\bless than\b|\bnot more than\b|<", normalized):
-            args["max_amount"] = amount
-        elif amount is not None and re.search(r"\babove\b|\bover\b|\bgreater than\b|\bmore than\b|\bat least\b|>", normalized):
-            args["min_amount"] = amount
-
-    if "successful" in normalized or "success" in normalized:
-        args["status"] = "Successful"
-    elif "failed" in normalized or "failure" in normalized:
-        args["status"] = "Failed"
-    elif "pending" in normalized:
-        args["status"] = "Pending"
-
-    return {
-        "intent": "payout",
-        "tool_name": "fetch_all_payouts",
-        "arguments": args,
-        "missing_fields": [],
-        "assistant_message": "I will fetch the matching payouts.",
-        "ready_to_call_tool": True,
-    }
-
-
-def apply_merchant_history_fallback(
-    messages: List[Dict[str, Any]],
-    normalized_decision: Dict[str, Any],
-    actor_type: str,
-) -> Dict[str, Any]:
-    if actor_type != "merchant":
-        return normalized_decision
-
-    inferred = infer_payout_history_decision(messages)
-    if not inferred:
-        return normalized_decision
-
-    tool_name = normalized_decision.get("tool_name")
-    if tool_name and tool_name != "fetch_all_payouts":
-        return normalized_decision
-
-    if tool_name == "fetch_all_payouts" and normalized_decision.get("ready_to_call_tool"):
-        merged = dict(inferred["arguments"])
-        merged.update(normalized_decision.get("arguments") or {})
-        normalized_decision["arguments"] = merged
-        return normalized_decision
-
-    return inferred
+    return "Can you provide more details?"
 
 
 def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
@@ -374,6 +290,82 @@ def generate_source_reference(conversation_id: str) -> str:
     return f"conv_{conversation_id}_{uuid.uuid4().hex[:12]}"
 
 
+def infer_payout_history_decision(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    text = " ".join(str(m.get("content", "")) for m in messages).lower()
+
+    def parse_amounts() -> Dict[str, float]:
+        result: Dict[str, float] = {}
+        between_match = re.search(r"between\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)\s+and\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if between_match:
+            result["min_amount"] = float(between_match.group(1).replace(",", ""))
+            result["max_amount"] = float(between_match.group(2).replace(",", ""))
+            return result
+
+        lower_match = re.search(r"(?:lower than|below)\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if lower_match:
+            result["max_amount"] = float(lower_match.group(1).replace(",", ""))
+            return result
+
+        higher_match = re.search(r"(?:higher than|above|greater than)\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if higher_match:
+            result["min_amount"] = float(higher_match.group(1).replace(",", ""))
+            return result
+
+        amount_match = re.search(r"ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if amount_match:
+            result["amount"] = float(amount_match.group(1).replace(",", ""))
+        return result
+
+    if "payout" not in text and "payouts" not in text:
+        return {
+            "intent": "general_chat",
+            "tool_name": None,
+            "arguments": {},
+            "missing_fields": [],
+            "assistant_message": "",
+            "ready_to_call_tool": False,
+        }
+
+    arguments = parse_amounts()
+    if arguments:
+        arguments.setdefault("currency", "NGN")
+        return {
+            "intent": "payout",
+            "tool_name": "fetch_all_payouts",
+            "arguments": arguments,
+            "missing_fields": [],
+            "assistant_message": "Fetching payouts based on your filters.",
+            "ready_to_call_tool": True,
+        }
+
+    return {
+        "intent": "payout",
+        "tool_name": "fetch_all_payouts",
+        "arguments": {"currency": "NGN"},
+        "missing_fields": [],
+        "assistant_message": "Fetching payouts.",
+        "ready_to_call_tool": True,
+    }
+
+
+def apply_merchant_history_fallback(
+    messages: List[Dict[str, Any]],
+    decision: Dict[str, Any],
+    actor_type: str = "customer",
+) -> Dict[str, Any]:
+    if actor_type != "merchant":
+        return decision
+
+    if decision.get("tool_name") or decision.get("ready_to_call_tool"):
+        return decision
+
+    fallback = infer_payout_history_decision(messages)
+    if fallback.get("tool_name") == "fetch_all_payouts":
+        return fallback
+
+    return decision
+
+
 def ensure_backend_source_reference(conversation_id: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     updated = dict(arguments or {})
     if tool_name in {"initiate_checkout", "initiate_payout"} and not updated.get("source_reference"):
@@ -400,12 +392,9 @@ async def decide_next_step(messages: List[Dict[str, Any]], actor_type: str = "cu
             "tool_name": tool_name,
             "arguments": decision.get("arguments") or {},
             "missing_fields": decision.get("missing_fields") or [],
-            "assistant_message": sanitize_assistant_message(
-                decision.get("assistant_message") or "Can you provide more details?"
-            ),
+            "assistant_message": default_assistant_message(decision),
             "ready_to_call_tool": bool(decision.get("ready_to_call_tool")),
         }
-        normalized = apply_merchant_history_fallback(messages, normalized, actor_type)
         set_attributes(
             span,
             {
@@ -470,11 +459,11 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any], actor
         checkout_url = extract_checkout_url(result)
         conv["pending_tool_call"] = None
         conv["last_tool_result"] = result
-        conv["completed"] = True
         conv["checkout_url"] = checkout_url
 
         if tool_name == "initiate_checkout" and checkout_url:
             message = f"Checkout initiated. Open this URL to complete payment: {checkout_url}"
+            conv["completed"] = True
         elif result.get("status") == "not_implemented":
             message = result.get("message", "That tool is not implemented yet.")
             conv["completed"] = False
@@ -483,6 +472,7 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any], actor
             conv["completed"] = False
         else:
             message = "Done."
+            conv["completed"] = True
 
         save_conversation(conversation_id, conv)
         set_attributes(
@@ -627,11 +617,10 @@ async def process_conversation(conversation_id: Optional[str], actor_type: str =
             set_output(span, {"status": "collecting", "assistant_message": decision.get("assistant_message")}, "application/json")
             return {
                 "conversation_id": cid,
-                "assistant_message": decision.get("assistant_message") or "Can you provide more details?",
+                "assistant_message": decision.get("assistant_message") or default_assistant_message(decision),
                 "status": "collecting",
                 "checkout_url": None,
             }
-
         set_attribute(span, "agent.status", "preparing_tool")
         result = await prepare_tool_confirmation(cid, conv, decision, actor_type)
         set_output(span, result, "application/json")
