@@ -7,7 +7,6 @@ on:
 jobs:
   test:
     name: Agent Test Suite
-    env:
     runs-on: ubuntu-latest
 
     steps:
