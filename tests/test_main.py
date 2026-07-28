@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from app import agent
 from app.memory import save_webhook_event
 from app.main import app
+from app.auth import create_access_token
 
 
 client = TestClient(app)
@@ -29,22 +30,27 @@ def test_conversation_reuses_cookie_conversation_id(monkeypatch):
 
     monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
 
+    # Generate a JWT token directly for CI and local consistency
+    token = create_access_token("customer")
+    headers = {"Authorization": f"Bearer {token}"}
+
     first = client.post(
         "/conversation",
         json={"message": {"role": "user", "content": "hello"}},
-        headers={"X-API-Key": "ayanfe"},
+        headers=headers,
     )
+    assert first.status_code == 200, f"First request failed: {first.text}"
+
     second = client.post(
         "/conversation",
         json={"message": {"role": "user", "content": "what happened last?"}},
-        headers={"X-API-Key": "ayanfe"},
+        headers=headers,
     )
+    assert second.status_code == 200, f"Second request failed: {second.text}"
 
     first_id = first.json()["conversation_id"]
     second_id = second.json()["conversation_id"]
 
-    assert first.status_code == 200
-    assert second.status_code == 200
     assert second_id == first_id
     assert [m["role"] for m in agent.conversation_store[first_id]["messages"]] == [
         "user",
@@ -176,14 +182,20 @@ def test_conversation_response_sanitizes_internal_words(monkeypatch):
 
     monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
 
+    # Generate valid JWT token
+    token = create_access_token("customer")
+    headers = {"Authorization": f"Bearer {token}"}
+
     res = client.post(
         "/conversation",
         json={"message": {"role": "user", "content": "hello"}},
-        headers={"X-API-Key": "ayanfe"},
+        headers=headers,
     )
 
+    # Check status code before parsing body to prevent KeyError on failure
+    assert res.status_code == 200, f"Request failed: {res.text}"
+
     body = res.json()
-    assert res.status_code == 200
     assert "initiate_checkout" not in body["assistant_message"]
     assert "tool call" not in body["assistant_message"]
 
@@ -213,20 +225,26 @@ def test_conversation_confirmation_uses_request_conversation_id(monkeypatch):
 
     monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
 
+    # Generate valid JWT token
+    token = create_access_token("customer")
+    headers = {"Authorization": f"Bearer {token}"}
+
     first = client.post(
         "/conversation",
         json={"message": {"role": "user", "content": "create checkout for 1000"}},
-        headers={"X-API-Key": "ayanfe"},
+        headers=headers,
     )
+    assert first.status_code == 200, f"First request failed: {first.text}"
+
     cid = first.json()["conversation_id"]
+
     second = client.post(
         "/conversation",
         json={"conversation_id": cid, "message": {"role": "user", "content": "yes"}},
-        headers={"X-API-Key": "ayanfe"},
+        headers=headers,
     )
+    assert second.status_code == 200, f"Second request failed: {second.text}"
 
-    assert first.status_code == 200
-    assert second.status_code == 200
     assert second.json()["conversation_id"] == cid
     assert second.json()["status"] == "completed"
 
