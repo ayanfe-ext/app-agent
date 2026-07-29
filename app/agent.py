@@ -1,4 +1,5 @@
 import json
+import re
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -17,8 +18,32 @@ from .observability import (
     set_span_kind,
     start_span,
 )
-from .prompts import AGENT_DECISION_PROMPT
+from .prompts import CUSTOMER_AGENT_PROMPT, MERCHANT_AGENT_PROMPT
 from .tools import TOOL_REGISTRY, model_to_dict
+
+
+CUSTOMER_ALLOWED_TOOLS = {"initiate_checkout"}
+MERCHANT_ALLOWED_TOOLS = {"initiate_checkout", "initiate_payout", "fetch_checkout", "fetch_all_payouts"}
+PUBLIC_ACTION_TO_TOOL = {
+    "create_checkout": "initiate_checkout",
+    "checkout": "initiate_checkout",
+    "create_payout": "initiate_payout",
+    "payout": "initiate_payout",
+    "fetch_checkout": "fetch_checkout",
+    "fetch_all_payouts": "fetch_all_payouts",
+}
+INTERNAL_RESPONSE_REPLACEMENTS = {
+    "initiate_checkout": "create a checkout",
+    "initiate_payout": "create a payout",
+    "fetch_checkout": "fetch a checkout",
+    "fetch_all_payouts": "fetch all payouts",
+    "tool_name": "action",
+    "tool call": "payment action",
+    "tool": "payment action",
+    "function call": "payment action",
+    "backend": "system",
+    "schema": "format",
+}
 
 
 conversation_store: Dict[str, Dict[str, Any]] = {}
@@ -175,6 +200,55 @@ def user_declined_latest_message(message: str) -> bool:
     return message.lower().strip() in {"no", "n", "cancel", "stop", "do not proceed"}
 
 
+def allowed_tools_for_actor(actor_type: str) -> set[str]:
+    if actor_type == "merchant":
+        return MERCHANT_ALLOWED_TOOLS
+    return CUSTOMER_ALLOWED_TOOLS
+
+
+def prompt_for_actor(actor_type: str) -> str:
+    if actor_type == "merchant":
+        return MERCHANT_AGENT_PROMPT
+    return CUSTOMER_AGENT_PROMPT
+
+
+def tool_name_from_decision(decision: Dict[str, Any]) -> Optional[str]:
+    action = decision.get("action")
+    if action is not None:
+        normalized = str(action).strip()
+        if normalized.lower() in {"", "null", "none"}:
+            return None
+        return PUBLIC_ACTION_TO_TOOL.get(normalized, normalized)
+
+    tool_name = decision.get("tool_name")
+    if tool_name is not None:
+        normalized = str(tool_name).strip()
+        if normalized.lower() in {"", "null", "none"}:
+            return None
+        return normalized
+
+    return None
+
+
+def sanitize_assistant_message(message: str) -> str:
+    sanitized = message or ""
+    for internal, public in INTERNAL_RESPONSE_REPLACEMENTS.items():
+        sanitized = sanitized.replace(internal, public)
+        sanitized = sanitized.replace(internal.title(), public)
+    return sanitized
+
+
+def default_assistant_message(decision: Dict[str, Any]) -> str:
+    assistant_message = decision.get("assistant_message")
+    if assistant_message:
+        return sanitize_assistant_message(assistant_message)
+
+    if tool_name_from_decision(decision) is None:
+        return "Hi there! How can I help you today?"
+
+    return "Can you provide more details?"
+
+
 def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name == "initiate_checkout":
         return (
@@ -186,7 +260,8 @@ def summarize_tool_confirmation(tool_name: str, args: Dict[str, Any]) -> str:
     if tool_name == "initiate_payout":
         return (
             "Please confirm: initiate a payout of "
-            f"{args['currency']} {args['amount']} to {args['recipient_name']}?"
+            f"{args['currency']} {args['amount']} to "
+            f"{args.get('account_name') or args.get('account_number')}?"
         )
 
     return "Please confirm that you want me to continue."
@@ -215,29 +290,109 @@ def generate_source_reference(conversation_id: str) -> str:
     return f"conv_{conversation_id}_{uuid.uuid4().hex[:12]}"
 
 
+def infer_payout_history_decision(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
+    text = " ".join(str(m.get("content", "")) for m in messages).lower()
+
+    def parse_amounts() -> Dict[str, float]:
+        result: Dict[str, float] = {}
+        between_match = re.search(r"between\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)\s+and\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if between_match:
+            result["min_amount"] = float(between_match.group(1).replace(",", ""))
+            result["max_amount"] = float(between_match.group(2).replace(",", ""))
+            return result
+
+        lower_match = re.search(r"(?:lower than|below)\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if lower_match:
+            result["max_amount"] = float(lower_match.group(1).replace(",", ""))
+            return result
+
+        higher_match = re.search(r"(?:higher than|above|greater than)\s+ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if higher_match:
+            result["min_amount"] = float(higher_match.group(1).replace(",", ""))
+            return result
+
+        amount_match = re.search(r"ngn\s*([0-9,]+(?:\.[0-9]+)?)", text)
+        if amount_match:
+            result["amount"] = float(amount_match.group(1).replace(",", ""))
+        return result
+
+    if "payout" not in text and "payouts" not in text:
+        return {
+            "intent": "general_chat",
+            "tool_name": None,
+            "arguments": {},
+            "missing_fields": [],
+            "assistant_message": "",
+            "ready_to_call_tool": False,
+        }
+
+    arguments = parse_amounts()
+    if arguments:
+        arguments.setdefault("currency", "NGN")
+        return {
+            "intent": "payout",
+            "tool_name": "fetch_all_payouts",
+            "arguments": arguments,
+            "missing_fields": [],
+            "assistant_message": "Fetching payouts based on your filters.",
+            "ready_to_call_tool": True,
+        }
+
+    return {
+        "intent": "payout",
+        "tool_name": "fetch_all_payouts",
+        "arguments": {"currency": "NGN"},
+        "missing_fields": [],
+        "assistant_message": "Fetching payouts.",
+        "ready_to_call_tool": True,
+    }
+
+
+def apply_merchant_history_fallback(
+    messages: List[Dict[str, Any]],
+    decision: Dict[str, Any],
+    actor_type: str = "customer",
+) -> Dict[str, Any]:
+    if actor_type != "merchant":
+        return decision
+
+    if decision.get("tool_name") or decision.get("ready_to_call_tool"):
+        return decision
+
+    fallback = infer_payout_history_decision(messages)
+    if fallback.get("tool_name") == "fetch_all_payouts":
+        return fallback
+
+    return decision
+
+
 def ensure_backend_source_reference(conversation_id: str, tool_name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
     updated = dict(arguments or {})
-    if tool_name == "initiate_checkout" and not updated.get("source_reference"):
+    if tool_name in {"initiate_checkout", "initiate_payout"} and not updated.get("source_reference"):
         updated["source_reference"] = generate_source_reference(conversation_id)
     return updated
 
 
-async def decide_next_step(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
-    with start_span("agent.decide_next_step", {"conversation.message_count": len(messages)}) as span:
+async def decide_next_step(messages: List[Dict[str, Any]], actor_type: str = "customer") -> Dict[str, Any]:
+    with start_span(
+        "agent.decide_next_step",
+        {"conversation.message_count": len(messages), "actor.type": actor_type},
+    ) as span:
         set_span_kind(span, "chain")
         conversation_text = "\n".join(f"{m.get('role', 'user')}: {m.get('content', '')}" for m in messages)
         set_input(span, conversation_text)
-        prompt = AGENT_DECISION_PROMPT + "\n\nConversation:\n" + conversation_text
+        prompt = prompt_for_actor(actor_type) + "\n\nConversation:\n" + conversation_text
         res = await call_llm(prompt)
         text = res.get("text", "") if isinstance(res, dict) else ""
         decision = parse_model_json(text)
 
+        tool_name = tool_name_from_decision(decision)
         normalized = {
             "intent": decision.get("intent", "unknown"),
-            "tool_name": decision.get("tool_name"),
+            "tool_name": tool_name,
             "arguments": decision.get("arguments") or {},
             "missing_fields": decision.get("missing_fields") or [],
-            "assistant_message": decision.get("assistant_message") or "Can you provide more details?",
+            "assistant_message": default_assistant_message(decision),
             "ready_to_call_tool": bool(decision.get("ready_to_call_tool")),
         }
         set_attributes(
@@ -253,7 +408,7 @@ async def decide_next_step(messages: List[Dict[str, Any]]) -> Dict[str, Any]:
         return normalized
 
 
-async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Dict[str, Any]:
+async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any], actor_type: str = "customer") -> Dict[str, Any]:
     pending = conv.get("pending_tool_call") or {}
     tool_name = pending.get("tool_name")
     with start_span(
@@ -262,6 +417,17 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
     ) as span:
         set_span_kind(span, "agent")
         set_input(span, {"conversation_id": conversation_id, "pending_tool_call": pending}, "application/json")
+        if tool_name not in allowed_tools_for_actor(actor_type):
+            conv["pending_tool_call"] = None
+            save_conversation(conversation_id, conv)
+            set_attributes(span, {"tool.allowed": False, "actor.type": actor_type})
+            return {
+                "conversation_id": conversation_id,
+                "assistant_message": "That action is not available in this conversation.",
+                "status": "collecting",
+                "checkout_url": None,
+            }
+
         tool = TOOL_REGISTRY.get(tool_name)
         if not tool:
             conv["pending_tool_call"] = None
@@ -293,11 +459,11 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
         checkout_url = extract_checkout_url(result)
         conv["pending_tool_call"] = None
         conv["last_tool_result"] = result
-        conv["completed"] = True
         conv["checkout_url"] = checkout_url
 
         if tool_name == "initiate_checkout" and checkout_url:
             message = f"Checkout initiated. Open this URL to complete payment: {checkout_url}"
+            conv["completed"] = True
         elif result.get("status") == "not_implemented":
             message = result.get("message", "That tool is not implemented yet.")
             conv["completed"] = False
@@ -306,6 +472,7 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
             conv["completed"] = False
         else:
             message = "Done."
+            conv["completed"] = True
 
         save_conversation(conversation_id, conv)
         set_attributes(
@@ -326,10 +493,16 @@ async def execute_pending_tool(conversation_id: str, conv: Dict[str, Any]) -> Di
             "assistant_message": message,
             "status": "completed" if conv["completed"] else "collecting",
             "checkout_url": checkout_url,
+            "tool_result": result,
         }
 
 
-async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], decision: Dict[str, Any]) -> Dict[str, Any]:
+async def prepare_tool_confirmation(
+    conversation_id: str,
+    conv: Dict[str, Any],
+    decision: Dict[str, Any],
+    actor_type: str = "customer",
+) -> Dict[str, Any]:
     tool_name = decision.get("tool_name")
     with start_span(
         "agent.prepare_tool_confirmation",
@@ -337,6 +510,16 @@ async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], 
     ) as span:
         set_span_kind(span, "agent")
         set_input(span, decision, "application/json")
+        if tool_name not in allowed_tools_for_actor(actor_type):
+            set_attributes(span, {"tool.allowed": False, "actor.type": actor_type})
+            set_output(span, {"status": "collecting", "error": "tool_not_allowed"}, "application/json")
+            return {
+                "conversation_id": conversation_id,
+                "assistant_message": "That action is not available in this conversation.",
+                "status": "collecting",
+                "checkout_url": None,
+            }
+
         arguments = ensure_backend_source_reference(conversation_id, tool_name, decision.get("arguments") or {})
         validated_args, error = validate_tool_call(tool_name, arguments)
         if error:
@@ -382,12 +565,13 @@ async def prepare_tool_confirmation(conversation_id: str, conv: Dict[str, Any], 
             "assistant_message": "Done.",
             "status": "completed",
             "checkout_url": checkout_url,
+            "tool_result": result,
         }
 
 
-async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]:
+async def process_conversation(conversation_id: Optional[str], actor_type: str = "customer") -> Dict[str, Any]:
     cid = _ensure_conversation(conversation_id)
-    with start_span("agent.process_conversation", {"conversation.id": cid}) as span:
+    with start_span("agent.process_conversation", {"conversation.id": cid, "actor.type": actor_type}) as span:
         set_span_kind(span, "agent")
         conv = conversation_store[cid]
         latest_message = conv["messages"][-1]["content"] if conv["messages"] else ""
@@ -403,7 +587,7 @@ async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]
         if conv.get("pending_tool_call"):
             if user_confirmed_latest_message(latest_message):
                 set_attribute(span, "confirmation.status", "confirmed")
-                result = await execute_pending_tool(cid, conv)
+                result = await execute_pending_tool(cid, conv, actor_type)
                 set_output(span, result, "application/json")
                 return result
             if user_declined_latest_message(latest_message):
@@ -427,19 +611,18 @@ async def process_conversation(conversation_id: Optional[str]) -> Dict[str, Any]
                 "checkout_url": None,
             }
 
-        decision = await decide_next_step(conv.get("messages", []))
+        decision = await decide_next_step(conv.get("messages", []), actor_type)
         if not decision.get("ready_to_call_tool"):
             set_attribute(span, "agent.status", "collecting")
             set_output(span, {"status": "collecting", "assistant_message": decision.get("assistant_message")}, "application/json")
             return {
                 "conversation_id": cid,
-                "assistant_message": decision.get("assistant_message") or "Can you provide more details?",
+                "assistant_message": decision.get("assistant_message") or default_assistant_message(decision),
                 "status": "collecting",
                 "checkout_url": None,
             }
-
         set_attribute(span, "agent.status", "preparing_tool")
-        result = await prepare_tool_confirmation(cid, conv, decision)
+        result = await prepare_tool_confirmation(cid, conv, decision, actor_type)
         set_output(span, result, "application/json")
         return result
 

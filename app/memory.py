@@ -24,6 +24,18 @@ def _connect() -> sqlite3.Connection:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS webhook_events (
+            reference TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            status TEXT,
+            payload_json TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
     return conn
 
 
@@ -105,3 +117,68 @@ def clear_conversations() -> None:
         with _connect() as conn:
             conn.execute("DELETE FROM conversations")
         set_output(span, {"cleared": True}, "application/json")
+
+
+def save_webhook_event(reference: str, event_type: str, status: Optional[str], payload: Dict[str, Any]) -> Dict[str, Any]:
+    with start_span("memory.save_webhook_event", {"webhook.reference": reference, "webhook.event_type": event_type}) as span:
+        set_span_kind(span, "chain")
+        set_input(span, {"reference": reference, "event_type": event_type, "status": status}, "application/json")
+        now = datetime.now(timezone.utc).isoformat()
+        payload_json = json.dumps(payload)
+
+        with _connect() as conn:
+            existing = conn.execute(
+                "SELECT event_type, status, payload_json FROM webhook_events WHERE reference = ?",
+                (reference,),
+            ).fetchone()
+            duplicate = bool(existing and existing[0] == event_type)
+            if not duplicate:
+                created_at = now
+                if existing:
+                    created_at = conn.execute(
+                        "SELECT created_at FROM webhook_events WHERE reference = ?",
+                        (reference,),
+                    ).fetchone()[0]
+                conn.execute(
+                    """
+                    INSERT INTO webhook_events (reference, event_type, status, payload_json, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(reference) DO UPDATE SET
+                        event_type = excluded.event_type,
+                        status = excluded.status,
+                        payload_json = excluded.payload_json,
+                        updated_at = excluded.updated_at
+                    """,
+                    (reference, event_type, status, payload_json, created_at, now),
+                )
+
+        result = {"saved": not duplicate, "duplicate": duplicate}
+        set_output(span, result, "application/json")
+        return result
+
+
+def load_webhook_event(reference: str) -> Optional[Dict[str, Any]]:
+    with start_span("memory.load_webhook_event", {"webhook.reference": reference}) as span:
+        set_span_kind(span, "chain")
+        set_input(span, {"reference": reference}, "application/json")
+        with _connect() as conn:
+            row = conn.execute(
+                "SELECT reference, event_type, status, payload_json, created_at, updated_at FROM webhook_events WHERE reference = ?",
+                (reference,),
+            ).fetchone()
+
+        if not row:
+            set_output(span, {"found": False}, "application/json")
+            return None
+
+        payload = json.loads(row[3])
+        result = {
+            "reference": row[0],
+            "event_type": row[1],
+            "status": row[2],
+            "payload": payload,
+            "created_at": row[4],
+            "updated_at": row[5],
+        }
+        set_output(span, {"found": True, "event_type": row[1], "status": row[2]}, "application/json")
+        return result

@@ -56,6 +56,12 @@ Thumbs.db
 .cache/
 .ipynb_checkpoints/
 
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+
 # Local proposal drafts
 PROJECT_PROPOSAL.md
 PROJECT_PROPOSAL.docx
@@ -63,3 +69,7 @@ PROJECT_PROPOSAL.pdf
 
 # Uvicorn/watch reload noise
 *.reload
+
+
+# refactor
+bank_resolution/
