@@ -254,31 +254,31 @@ function ResultCard({ message, onTrack, trackedSourceRef }) {
     return <PayoutTable rows={data} />;
   }
 
-  if (data?.sourceReference || data?.reference || data?.status) {
-    return (
-      <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
-        <div className="mb-4 flex items-start justify-between gap-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.24em] text-white/35">Structured result</p>
-            <h3 className="mt-1 text-lg font-semibold">{data.recipientAccountName || data.customer?.name || "Payment result"}</h3>
-          </div>
-          <span className={cx("rounded-full border px-3 py-1 text-xs", statusTone(data.status || data.checkoutStatus))}>{data.status || data.checkoutStatus || "Created"}</span>
-        </div>
-        <div className="grid gap-3 text-sm sm:grid-cols-2">
-          <Info label="Amount" value={amountLabel(data.amount || data.checkoutAmount)} />
-          <Info label="Reference" value={data.reference || data.checkoutReference || "N/A"} />
-          <Info label="Source reference" value={data.sourceReference || "N/A"} />
-          <Info label="Bank" value={data.recipientBankName || data.paymentChannel || "N/A"} />
-        </div>
-        {data.sourceReference && (
-          <button onClick={() => onTrack(data.sourceReference)} className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-neon/30 bg-neon/10 px-4 py-2 text-sm text-neon transition hover:bg-neon/15">
-            <Clock3 className="h-4 w-4" />
-            {trackedSourceRef === data.sourceReference ? "Refresh payout status" : "Track payout status"}
-          </button>
-        )}
-      </motion.div>
-    );
-  }
+  // if (data?.sourceReference || data?.reference || data?.status) {
+  //   return (
+  //     <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="mt-4 rounded-3xl border border-white/10 bg-black/20 p-4">
+  //       <div className="mb-4 flex items-start justify-between gap-4">
+  //         <div>
+  //           <p className="text-xs uppercase tracking-[0.24em] text-white/35">Structured result</p>
+  //           <h3 className="mt-1 text-lg font-semibold">{data.recipientAccountName || data.customer?.name || "Payment result"}</h3>
+  //         </div>
+  //         <span className={cx("rounded-full border px-3 py-1 text-xs", statusTone(data.status || data.checkoutStatus))}>{data.status || data.checkoutStatus || "Created"}</span>
+  //       </div>
+  //       <div className="grid gap-3 text-sm sm:grid-cols-2">
+  //         <Info label="Amount" value={amountLabel(data.amount || data.checkoutAmount)} />
+  //         <Info label="Reference" value={data.reference || data.checkoutReference || "N/A"} />
+  //         <Info label="Source reference" value={data.sourceReference || "N/A"} />
+  //         <Info label="Bank" value={data.recipientBankName || data.paymentChannel || "N/A"} />
+  //       </div>
+  //       {data.sourceReference && (
+  //         <button onClick={() => onTrack(data.sourceReference)} className="mt-4 inline-flex items-center gap-2 rounded-2xl border border-neon/30 bg-neon/10 px-4 py-2 text-sm text-neon transition hover:bg-neon/15">
+  //           <Clock3 className="h-4 w-4" />
+  //           {trackedSourceRef === data.sourceReference ? "Refresh payout status" : "Track payout status"}
+  //         </button>
+  //       )}
+  //     </motion.div>
+  //   );
+  // }
 
   return (
     <pre className="mt-4 max-h-72 overflow-auto rounded-2xl border border-white/10 bg-black/30 p-4 text-xs text-white/70">

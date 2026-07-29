@@ -23,8 +23,8 @@ class Settings(BaseSettings):
     app_api_key: str = ""
     merchant_api_key: str = ""
     rate_limit_per_minute: int = 0
-    jwt_secret_key: str = "change-me-in-production"
-    jwt_algorithm: str = "HS256"
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = ""
     jwt_exp_minutes: int = 60
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     atlas_webhook_verify: bool = False
