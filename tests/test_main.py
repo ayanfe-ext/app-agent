@@ -30,6 +30,7 @@ def test_conversation_reuses_cookie_conversation_id(monkeypatch):
 
     monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
 
+    monkeypatch.setattr("app.auth.settings.jwt_secret_key", "test-jwt-secret-with-at-least-32-bytes")
     # Generate a JWT token directly for CI and local consistency
     token = create_access_token("customer")
     headers = {"Authorization": f"Bearer {token}"}
@@ -183,6 +184,8 @@ def test_conversation_response_sanitizes_internal_words(monkeypatch):
     monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
 
     # Generate valid JWT token
+    monkeypatch.setattr("app.auth.settings.jwt_secret_key", "test-jwt-secret-with-at-least-32-bytes")
+
     token = create_access_token("customer")
     headers = {"Authorization": f"Bearer {token}"}
 
@@ -225,6 +228,7 @@ def test_conversation_confirmation_uses_request_conversation_id(monkeypatch):
 
     monkeypatch.setattr(agent, "process_conversation", fake_process_conversation)
 
+    monkeypatch.setattr("app.auth.settings.jwt_secret_key", "test-jwt-secret-with-at-least-32-bytes")
     # Generate valid JWT token
     token = create_access_token("customer")
     headers = {"Authorization": f"Bearer {token}"}
